@@ -36,7 +36,7 @@ jobs:
       - name: Download Linux adb
         run: |
           curl -fsSL -o /tmp/platform-tools.zip https://dl.google.com/android/repository/platform-tools-latest-linux.zip
-          unzip -j /tmp/platform-tools.zip platform-tools/adb -d src-tauri/resources/
+          unzip -jo /tmp/platform-tools.zip platform-tools/adb -d src-tauri/resources/
 
       - name: Build Tauri
         uses: tauri-apps/tauri-action@v0
