@@ -170,3 +170,53 @@ pub async fn kill_scrcpy_server(serial: &str) {
 pub async fn exec_out_screencap(serial: &str) -> Result<Vec<u8>> {
     run_adb(&["-s", serial, "exec-out", "screencap", "-p"]).await
 }
+
+pub async fn connect_device(address: &str) -> Result<()> {
+    let output = run_adb_text(&["connect", address]).await?;
+    if output.contains("connected") || output.contains("already connected") {
+        Ok(())
+    } else {
+        Err(anyhow!("Failed to connect: {}", output.trim()))
+    }
+}
+
+pub async fn tcpip(serial: &str, port: u16) -> Result<()> {
+    run_adb(&["-s", serial, "tcpip", &port.to_string()]).await?;
+    Ok(())
+}
+
+pub async fn disconnect_device(address: &str) -> Result<()> {
+    run_adb(&["disconnect", address]).await?;
+    Ok(())
+}
+
+pub async fn get_device_ip(serial: &str) -> Result<Option<String>> {
+    if let Ok(output) = run_adb_text(&["-s", serial, "shell", "ip", "route"]).await {
+        for line in output.lines() {
+            if line.contains("wlan") {
+                if let Some(idx) = line.find("src ") {
+                    if let Some(ip) = line[idx + 4..].split_whitespace().next() {
+                        return Ok(Some(ip.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(output) = run_adb_text(&[
+        "-s", serial, "shell", "ip", "-f", "inet", "addr", "show", "wlan0",
+    ])
+    .await
+    {
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("inet ") {
+                if let Some(ip) = rest.split('/').next() {
+                    return Ok(Some(ip.to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}

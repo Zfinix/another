@@ -272,14 +272,71 @@ body {
   text-overflow: ellipsis;
 }
 
-.device-card-arrow {
-  color: var(--text-3);
+.device-wifi-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  font-family: var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--accent);
+  color: #fff;
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.device-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   flex-shrink: 0;
 }
 
-.device-card-arrow svg {
+.device-card-chevron {
   width: 14px;
   height: 14px;
+  color: var(--text-3);
+}
+
+.device-wifi-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: none;
+  color: var(--text-3);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+
+.device-wifi-toggle svg {
+  width: 15px;
+  height: 15px;
+}
+
+.device-wifi-toggle:hover {
+  opacity: 1;
+  background: var(--surface-2);
+}
+
+.device-wifi-toggle.active {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.device-wifi-toggle.active:hover {
+  background: var(--surface-2);
+}
+
+.device-wifi-toggle:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 .device-empty {
@@ -845,4 +902,251 @@ body {
 @keyframes toast-out {
   from { opacity: 1; }
   to { opacity: 0; }
+}
+
+/* ===== Settings hint ===== */
+.setting-hint {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: -4px;
+}
+
+/* ===== WiFi Dialog ===== */
+.wifi-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  width: 340px;
+  max-width: 90vw;
+  z-index: 50;
+  box-shadow: var(--card-shadow);
+  overflow: hidden;
+}
+
+.wifi-dialog-title {
+  font-size: 15px;
+  font-weight: 600;
+  padding: 20px 20px 0;
+}
+
+.wifi-dialog-section {
+  padding: 16px 20px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wifi-dialog-section:first-of-type {
+  border-top: none;
+}
+
+.wifi-dialog-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-3);
+  margin-bottom: 10px;
+}
+
+.wifi-dialog-desc {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+.wifi-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wifi-device-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border-radius: 8px;
+}
+
+.wifi-device-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.wifi-device-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wifi-enable-btn {
+  padding: 5px 12px;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.wifi-enable-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.wifi-dialog-form {
+  display: flex;
+  gap: 8px;
+}
+
+.wifi-input {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+}
+
+.wifi-input:focus {
+  border-color: var(--accent);
+}
+
+.wifi-input::placeholder {
+  color: var(--text-3);
+}
+
+.wifi-connect-btn {
+  padding: 8px 16px;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.wifi-connect-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ===== Command Bar ===== */
+.cmdbar-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 200;
+  display: flex;
+  justify-content: center;
+  padding-top: 80px;
+}
+
+.cmdbar {
+  width: 360px;
+  max-width: 90vw;
+  max-height: 400px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  align-self: flex-start;
+}
+
+.cmdbar-input {
+  padding: 12px 16px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 14px;
+  color: var(--text);
+  outline: none;
+}
+
+.cmdbar-input::placeholder {
+  color: var(--text-3);
+}
+
+.cmdbar-list {
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.cmdbar-section {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-3);
+  padding: 8px 10px 4px;
+}
+
+.cmdbar-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.cmdbar-item.selected {
+  background: var(--surface-2);
+}
+
+.cmdbar-item-label {
+  flex: 1;
+}
+
+.cmdbar-keys {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.cmdbar-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 11px;
+  font-family: var(--sans);
+  font-weight: 500;
+  color: var(--text-2);
+  box-shadow: 0 1px 0 var(--border);
+}
+
+.cmdbar-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-3);
 }

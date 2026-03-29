@@ -27,6 +27,8 @@ export function useConnection(opts: UseConnectionOptions) {
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
   const [connectingSerial, setConnectingSerial] = useState<string | null>(null);
   const [deviceSize, setDeviceSize] = useState({ width: 1080, height: 1920 });
+  const [muted, setMutedState] = useState(false);
+  const [recording, setRecording] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const decoderRef = useRef<VideoDecoder | null>(null);
   const pendingFrame = useRef<VideoFrame | null>(null);
@@ -34,6 +36,8 @@ export function useConnection(opts: UseConnectionOptions) {
   const isMouseDown = useRef(false);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isReconnecting = useRef(false);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunks = useRef<Blob[]>([]);
 
   const cleanupDecoder = useCallback(() => {
     if (rafId.current) {
@@ -48,6 +52,15 @@ export function useConnection(opts: UseConnectionOptions) {
       decoderRef.current.close();
       decoderRef.current = null;
     }
+    setMutedState(false);
+    if (recorderRef.current && recorderRef.current.state === "recording") {
+      recorderRef.current.stop();
+    }
+  }, []);
+
+  const setMuted = useCallback(async (m: boolean) => {
+    setMutedState(m);
+    try { await invoke("set_muted", { muted: m }); } catch {}
   }, []);
 
   const connectToDevice = useCallback(async (device: Device, s: Settings, silent = false) => {
@@ -154,6 +167,38 @@ export function useConnection(opts: UseConnectionOptions) {
     }, 800);
   }, [connectedDevice, connectToDevice]);
 
+  const toggleRecording = useCallback(() => {
+    if (recorderRef.current && recorderRef.current.state === "recording") {
+      recorderRef.current.stop();
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const stream = canvas.captureStream(30);
+    recordedChunks.current = [];
+    const recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) recordedChunks.current.push(e.data);
+    };
+    recorder.onstop = () => {
+      const blob = new Blob(recordedChunks.current, { type: "video/webm" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `recording-${Date.now()}.webm`;
+      link.click();
+      URL.revokeObjectURL(url);
+      recordedChunks.current = [];
+      recorderRef.current = null;
+      setRecording(false);
+      showToast("Recording saved", "info");
+    };
+    recorder.start(100);
+    recorderRef.current = recorder;
+    setRecording(true);
+    showToast("Recording started", "info");
+  }, [showToast]);
+
   const pressButton = useCallback(async (button: string) => {
     try { await invoke("press_button", { button }); } catch {}
   }, []);
@@ -225,6 +270,10 @@ export function useConnection(opts: UseConnectionOptions) {
     deviceSize,
     canvasRef,
     isMouseDown,
+    muted,
+    recording,
+    setMuted,
+    toggleRecording,
     connectToDevice,
     disconnect,
     scheduleReconnect,

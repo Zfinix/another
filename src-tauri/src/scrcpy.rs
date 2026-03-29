@@ -15,6 +15,7 @@ pub struct StreamSettings {
     pub max_fps: u32,
     pub video_bit_rate: u32,
     pub video_codec: String,
+    pub audio: bool,
 }
 
 impl Default for StreamSettings {
@@ -24,12 +25,14 @@ impl Default for StreamSettings {
             max_fps: 60,
             video_bit_rate: 8000000,
             video_codec: "h264".to_string(),
+            audio: false,
         }
     }
 }
 
 pub struct ConnectedStreams {
     pub video_socket: TcpStream,
+    pub audio_socket: Option<TcpStream>,
     pub control_socket: TcpStream,
     pub screen_width: u32,
     pub screen_height: u32,
@@ -56,10 +59,16 @@ pub async fn start_server(
 
     adb::reverse(serial, "localabstract:scrcpy", port).await?;
 
+    let audio_args = if settings.audio {
+        "audio=true audio_codec=raw"
+    } else {
+        "audio=false"
+    };
+
     let server_cmd = format!(
         "CLASSPATH={path} app_process / com.genymobile.scrcpy.Server 2.7 \
          tunnel_forward=false \
-         audio=false \
+         {audio_args} \
          control=true \
          video_codec={codec} \
          max_size={max_size} \
@@ -69,6 +78,7 @@ pub async fn start_server(
          send_dummy_byte=false \
          log_level=info",
         path = SCRCPY_SERVER_REMOTE_PATH,
+        audio_args = audio_args,
         codec = settings.video_codec,
         max_size = settings.max_size,
         max_fps = settings.max_fps,
@@ -107,6 +117,23 @@ pub async fn start_server(
     .map_err(|_| anyhow!("Timeout waiting for video connection"))?
     .map_err(|e| anyhow!("Accept failed: {}", e))?;
 
+    let audio_socket = if settings.audio {
+        let (mut audio_sock, _) = tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            listener.accept(),
+        )
+        .await
+        .map_err(|_| anyhow!("Timeout waiting for audio connection"))?
+        .map_err(|e| anyhow!("Accept failed: {}", e))?;
+
+        let mut audio_codec_buf = [0u8; 4];
+        audio_sock.read_exact(&mut audio_codec_buf).await?;
+
+        Some(audio_sock)
+    } else {
+        None
+    };
+
     let (control_socket, _) = tokio::time::timeout(
         tokio::time::Duration::from_secs(5),
         listener.accept(),
@@ -131,6 +158,7 @@ pub async fn start_server(
     Ok((
         ConnectedStreams {
             video_socket,
+            audio_socket,
             control_socket,
             screen_width,
             screen_height,

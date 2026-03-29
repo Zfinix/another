@@ -1,4 +1,5 @@
 mod adb;
+mod audio;
 mod commands;
 mod control;
 mod scrcpy;
@@ -60,6 +61,11 @@ pub fn run() {
             commands::send_scroll,
             commands::take_screenshot,
             commands::press_button,
+            commands::set_muted,
+            commands::wifi_connect,
+            commands::wifi_disconnect,
+            commands::wifi_enable,
+            commands::get_device_ip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
