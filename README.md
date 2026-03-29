@@ -19,9 +19,16 @@ Uses a bundled [scrcpy-server](https://github.com/Genymobile/scrcpy) to stream v
 - Automatic device detection via ADB
 - Light/dark/auto theme
 
+## Platform Support
+
+| Platform | Status |
+|----------|--------|
+| macOS | Supported |
+| Linux | Experimental |
+| Windows | Experimental |
+
 ## Prerequisites
 
-- macOS (currently supported platform)
 - An Android device connected via USB with USB debugging enabled
 - [Rust](https://www.rust-lang.org/tools/install)
 - [Node.js](https://nodejs.org/) and [Bun](https://bun.sh/)
