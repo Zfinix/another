@@ -4,6 +4,15 @@ import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import type { Device, Settings, FrameEvent, Screen } from "../types";
 
+function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
 interface UseConnectionOptions {
   settings: Settings;
   showToast: (msg: string, type?: "error" | "info") => void;
@@ -19,49 +28,85 @@ export function useConnection(opts: UseConnectionOptions) {
   const [connecting, setConnecting] = useState(false);
   const [deviceSize, setDeviceSize] = useState({ width: 1080, height: 1920 });
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const pendingFrame = useRef<{ width: number; height: number; jpeg_base64: string } | null>(null);
+  const decoderRef = useRef<VideoDecoder | null>(null);
+  const pendingFrame = useRef<VideoFrame | null>(null);
   const rafId = useRef<number>(0);
   const isMouseDown = useRef(false);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isReconnecting = useRef(false);
 
+  const cleanupDecoder = useCallback(() => {
+    if (rafId.current) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = 0;
+    }
+    if (pendingFrame.current) {
+      pendingFrame.current.close();
+      pendingFrame.current = null;
+    }
+    if (decoderRef.current && decoderRef.current.state !== "closed") {
+      decoderRef.current.close();
+      decoderRef.current = null;
+    }
+  }, []);
+
   const connectToDevice = useCallback(async (device: Device, s: Settings, silent = false) => {
     setConnecting(true);
+    cleanupDecoder();
     try {
       const channel = new Channel<FrameEvent>();
       channel.onmessage = (msg) => {
-        if (msg.event === "frame") {
-          pendingFrame.current = msg.data;
-          if (!rafId.current) {
-            rafId.current = requestAnimationFrame(() => {
-              rafId.current = 0;
-              const frame = pendingFrame.current;
-              if (!frame) return;
-              pendingFrame.current = null;
-              const canvas = canvasRef.current;
-              if (!canvas) return;
-              const ctx = canvas.getContext("2d");
-              if (!ctx) return;
-              const bytes = Uint8Array.from(atob(frame.jpeg_base64), (c) => c.charCodeAt(0));
-              const blob = new Blob([bytes], { type: "image/jpeg" });
-              createImageBitmap(blob).then((bmp) => {
-                if (canvas.width !== frame.width || canvas.height !== frame.height) {
-                  canvas.width = frame.width;
-                  canvas.height = frame.height;
-                }
-                ctx.drawImage(bmp, 0, 0);
-                bmp.close();
-              });
-            });
-          }
+        if (msg.event === "config") {
+          cleanupDecoder();
+          const descBytes = b64ToBytes(msg.data.description);
+          const decoder = new VideoDecoder({
+            output: (frame: VideoFrame) => {
+              if (pendingFrame.current) pendingFrame.current.close();
+              pendingFrame.current = frame;
+              if (!rafId.current) {
+                rafId.current = requestAnimationFrame(() => {
+                  rafId.current = 0;
+                  const f = pendingFrame.current;
+                  if (!f) return;
+                  pendingFrame.current = null;
+                  const canvas = canvasRef.current;
+                  if (!canvas) { f.close(); return; }
+                  if (canvas.width !== f.displayWidth || canvas.height !== f.displayHeight) {
+                    canvas.width = f.displayWidth;
+                    canvas.height = f.displayHeight;
+                    setDeviceSize({ width: f.displayWidth, height: f.displayHeight });
+                  }
+                  const ctx = canvas.getContext("2d");
+                  if (ctx) ctx.drawImage(f, 0, 0);
+                  f.close();
+                });
+              }
+            },
+            error: (e: DOMException) => console.error("Decoder error:", e),
+          });
+          const config: VideoDecoderConfig = {
+            codec: msg.data.codec,
+            description: descBytes.buffer,
+            hardwareAcceleration: "prefer-hardware",
+          };
+          decoder.configure(config);
+          decoderRef.current = decoder;
+        } else if (msg.event === "packet") {
+          const decoder = decoderRef.current;
+          if (!decoder || decoder.state !== "configured") return;
+          const bytes = b64ToBytes(msg.data.data);
+          decoder.decode(new EncodedVideoChunk({
+            type: msg.data.key ? "key" : "delta",
+            timestamp: msg.data.timestamp,
+            data: bytes,
+          }));
         } else if (msg.event === "disconnected") {
+          cleanupDecoder();
           if (!isReconnecting.current) {
             setConnectedDevice(null);
             setScreen("welcome");
             showToast("Device disconnected", "info");
           }
-        } else if (msg.event === "size_changed") {
-          setDeviceSize({ width: msg.data.width, height: msg.data.height });
         }
       };
 
@@ -87,16 +132,17 @@ export function useConnection(opts: UseConnectionOptions) {
       setConnecting(false);
       isReconnecting.current = false;
     }
-  }, [showToast]);
+  }, [showToast, cleanupDecoder]);
 
   const disconnect = useCallback(async () => {
+    cleanupDecoder();
     try { await invoke("disconnect_device"); } catch {}
     setConnectedDevice(null);
     setScreen("welcome");
     try {
       await getCurrentWindow().setSize(new LogicalSize(380, 750));
     } catch {}
-  }, []);
+  }, [cleanupDecoder]);
 
   const scheduleReconnect = useCallback((s: Settings) => {
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);

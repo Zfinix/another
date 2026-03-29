@@ -18,9 +18,9 @@ export interface Settings {
 }
 
 export type FrameEvent =
-  | { event: "frame"; data: { width: number; height: number; jpeg_base64: string } }
-  | { event: "disconnected"; data: { reason: string } }
-  | { event: "size_changed"; data: { width: number; height: number } };
+  | { event: "config"; data: { codec: string; description: string } }
+  | { event: "packet"; data: { key: boolean; data: string; timestamp: number } }
+  | { event: "disconnected"; data: { reason: string } };
 
 export type Screen = "welcome" | "another";
 
@@ -43,5 +43,4 @@ export const RESOLUTION_OPTIONS = [
 
 export const CODEC_OPTIONS = [
   { value: "h264", label: "H.264" },
-  { value: "h265", label: "H.265" },
 ];

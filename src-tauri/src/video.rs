@@ -1,27 +1,23 @@
 use anyhow::Result;
 use base64::Engine;
-use openh264::decoder::Decoder;
-use openh264::formats::YUVSource;
 use std::sync::Arc;
 use tauri::ipc::Channel;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
-use turbojpeg::{Compressor, Image, PixelFormat};
+
+const FLAG_CONFIG: u64 = 1 << 63;
+const FLAG_KEY_FRAME: u64 = 1 << 62;
 
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "event", content = "data")]
 pub enum FrameEvent {
-    #[serde(rename = "frame")]
-    Frame {
-        width: u32,
-        height: u32,
-        jpeg_base64: String,
-    },
+    #[serde(rename = "config")]
+    Config { codec: String, description: String },
+    #[serde(rename = "packet")]
+    Packet { key: bool, data: String, timestamp: u64 },
     #[serde(rename = "disconnected")]
     Disconnected { reason: String },
-    #[serde(rename = "size_changed")]
-    SizeChanged { width: u32, height: u32 },
 }
 
 pub async fn stream_video(
@@ -30,7 +26,7 @@ pub async fn stream_video(
     shutdown: Arc<Notify>,
 ) {
     let result = tokio::select! {
-        r = decode_loop(&mut video_socket, &channel) => r,
+        r = forward_loop(&mut video_socket, &channel) => r,
         _ = shutdown.notified() => Ok(()),
     };
 
@@ -41,84 +37,130 @@ pub async fn stream_video(
     }
 }
 
-async fn decode_loop(video_socket: &mut TcpStream, channel: &Channel<FrameEvent>) -> Result<()> {
-    let (packet_tx, packet_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
-
-    let channel_clone = channel.clone();
-    std::thread::spawn(move || {
-        render_thread(packet_rx, channel_clone);
-    });
-
+async fn forward_loop(
+    socket: &mut TcpStream,
+    channel: &Channel<FrameEvent>,
+) -> Result<()> {
     loop {
         let mut header = [0u8; 12];
-        video_socket.read_exact(&mut header).await?;
+        socket.read_exact(&mut header).await?;
 
-        let packet_size = u32::from_be_bytes(header[8..12].try_into()?) as usize;
-        if packet_size == 0 {
+        let pts_flags = u64::from_be_bytes(header[0..8].try_into()?);
+        let is_config = pts_flags & FLAG_CONFIG != 0;
+        let is_key = pts_flags & FLAG_KEY_FRAME != 0;
+        let pts = pts_flags & !(FLAG_CONFIG | FLAG_KEY_FRAME);
+
+        let size = u32::from_be_bytes(header[8..12].try_into()?) as usize;
+        if size == 0 {
             continue;
         }
 
-        let mut packet_data = vec![0u8; packet_size];
-        video_socket.read_exact(&mut packet_data).await?;
+        let mut data = vec![0u8; size];
+        socket.read_exact(&mut data).await?;
 
-        let _ = packet_tx.try_send(packet_data);
+        if is_config {
+            let nals = split_nals(&data);
+            let mut sps_list: Vec<&[u8]> = Vec::new();
+            let mut pps_list: Vec<&[u8]> = Vec::new();
+            let mut codec = String::from("avc1.42001e");
+
+            for nal in &nals {
+                if nal.is_empty() {
+                    continue;
+                }
+                let nal_type = nal[0] & 0x1F;
+                if nal_type == 7 && nal.len() >= 4 {
+                    codec = format!("avc1.{:02x}{:02x}{:02x}", nal[1], nal[2], nal[3]);
+                    sps_list.push(nal);
+                } else if nal_type == 8 {
+                    pps_list.push(nal);
+                }
+            }
+
+            let desc = build_avcc(&sps_list, &pps_list);
+            let _ = channel.send(FrameEvent::Config {
+                codec,
+                description: base64::engine::general_purpose::STANDARD.encode(&desc),
+            });
+        } else {
+            let avcc = nals_to_avcc(&data);
+            let _ = channel.send(FrameEvent::Packet {
+                key: is_key,
+                data: base64::engine::general_purpose::STANDARD.encode(&avcc),
+                timestamp: pts,
+            });
+        }
     }
 }
 
-fn render_thread(rx: std::sync::mpsc::Receiver<Vec<u8>>, channel: Channel<FrameEvent>) {
-    let mut decoder = match Decoder::new() {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let mut compressor = match Compressor::new() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let _ = compressor.set_quality(85);
-    let _ = compressor.set_subsamp(turbojpeg::Subsamp::Sub2x1);
+fn split_nals(data: &[u8]) -> Vec<&[u8]> {
+    let mut nals = Vec::new();
+    let len = data.len();
+    let mut i = 0;
 
-    let mut current_width: u32 = 0;
-    let mut current_height: u32 = 0;
-    let mut rgb_buf: Vec<u8> = Vec::new();
-
-    while let Ok(packet_data) = rx.recv() {
-        let yuv = match decoder.decode(&packet_data) {
-            Ok(Some(yuv)) => yuv,
-            _ => continue,
-        };
-
-        let (w, h) = yuv.dimensions();
-        let width = w as u32;
-        let height = h as u32;
-
-        if width != current_width || height != current_height {
-            current_width = width;
-            current_height = height;
-            rgb_buf.resize((width * height * 3) as usize, 0);
-            let _ = channel.send(FrameEvent::SizeChanged { width, height });
+    let mut sc_positions: Vec<(usize, usize)> = Vec::new();
+    while i + 2 < len {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            if i > 0 && data[i - 1] == 0 {
+                sc_positions.push((i - 1, 4));
+            } else {
+                sc_positions.push((i, 3));
+            }
+            i += 3;
+        } else {
+            i += 1;
         }
-
-        yuv.write_rgb8(&mut rgb_buf);
-
-        let image = Image {
-            pixels: rgb_buf.as_slice(),
-            width: width as usize,
-            pitch: width as usize * 3,
-            height: height as usize,
-            format: PixelFormat::RGB,
-        };
-
-        let jpeg_data = match compressor.compress_to_vec(image) {
-            Ok(data) => data,
-            Err(_) => continue,
-        };
-
-        let jpeg_base64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_data);
-
-        let _ = channel.send(FrameEvent::Frame {
-            width,
-            height,
-            jpeg_base64,
-        });
     }
+
+    for (idx, &(pos, sc_len)) in sc_positions.iter().enumerate() {
+        let nal_start = pos + sc_len;
+        let nal_end = if idx + 1 < sc_positions.len() {
+            sc_positions[idx + 1].0
+        } else {
+            len
+        };
+        if nal_start < nal_end {
+            nals.push(&data[nal_start..nal_end]);
+        }
+    }
+
+    nals
+}
+
+fn build_avcc(sps_list: &[&[u8]], pps_list: &[&[u8]]) -> Vec<u8> {
+    if sps_list.is_empty() {
+        return Vec::new();
+    }
+    let sps = sps_list[0];
+    let mut out = vec![
+        1,
+        sps[1],
+        sps[2],
+        sps[3],
+        0xFF,
+        0xE0 | sps_list.len() as u8,
+    ];
+    for s in sps_list {
+        out.push((s.len() >> 8) as u8);
+        out.push(s.len() as u8);
+        out.extend_from_slice(s);
+    }
+    out.push(pps_list.len() as u8);
+    for p in pps_list {
+        out.push((p.len() >> 8) as u8);
+        out.push(p.len() as u8);
+        out.extend_from_slice(p);
+    }
+    out
+}
+
+fn nals_to_avcc(data: &[u8]) -> Vec<u8> {
+    let nals = split_nals(data);
+    let mut out = Vec::with_capacity(data.len());
+    for nal in nals {
+        let len = nal.len() as u32;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(nal);
+    }
+    out
 }
