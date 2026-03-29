@@ -48,3 +48,41 @@ jobs:
           releaseBody: "See the assets for download links."
           releaseDraft: false
           prerelease: false
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Download Windows adb
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile "$env:TEMP\platform-tools.zip"
+          Expand-Archive -Path "$env:TEMP\platform-tools.zip" -DestinationPath "$env:TEMP\platform-tools"
+          Copy-Item "$env:TEMP\platform-tools\platform-tools\adb.exe" "src-tauri\resources\adb.exe"
+          Copy-Item "$env:TEMP\platform-tools\platform-tools\AdbWinApi.dll" "src-tauri\resources\AdbWinApi.dll"
+          Copy-Item "$env:TEMP\platform-tools\platform-tools\AdbWinUsbApi.dll" "src-tauri\resources\AdbWinUsbApi.dll"
+
+      - name: Build Tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Another ${{ github.ref_name }}"
+          releaseBody: "See the assets for download links."
+          releaseDraft: false
+          prerelease: false

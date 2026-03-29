@@ -17,26 +17,38 @@ pub struct Device {
     pub state: String,
 }
 
+fn adb_binary_name() -> &'static str {
+    if cfg!(windows) { "adb.exe" } else { "adb" }
+}
+
 fn adb_path() -> PathBuf {
+    let binary = adb_binary_name();
+
     if let Some(dir) = RESOURCE_DIR.get() {
-        let bundled = dir.join("resources").join("adb");
+        let bundled = dir.join("resources").join(binary);
         if bundled.exists() {
             return bundled;
         }
     }
     if let Ok(home) = std::env::var("HOME") {
-        let sdk_adb = PathBuf::from(&home).join("Library/Android/sdk/platform-tools/adb");
+        let sdk_adb = PathBuf::from(&home).join("Library/Android/sdk/platform-tools").join(binary);
+        if sdk_adb.exists() {
+            return sdk_adb;
+        }
+    }
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let sdk_adb = PathBuf::from(&local_app_data).join("Android/Sdk/platform-tools").join(binary);
         if sdk_adb.exists() {
             return sdk_adb;
         }
     }
     if let Ok(android_home) = std::env::var("ANDROID_HOME") {
-        let sdk_adb = PathBuf::from(&android_home).join("platform-tools/adb");
+        let sdk_adb = PathBuf::from(&android_home).join("platform-tools").join(binary);
         if sdk_adb.exists() {
             return sdk_adb;
         }
     }
-    PathBuf::from("adb")
+    PathBuf::from(binary)
 }
 
 async fn run_adb(args: &[&str]) -> Result<Vec<u8>> {
