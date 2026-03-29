@@ -6,6 +6,7 @@ import {
   XMarkIcon,
   HomeIcon,
   Square2StackIcon,
+  CommandLineIcon,
 } from "@heroicons/react/24/outline";
 import type { Device } from "../types";
 
@@ -18,6 +19,7 @@ interface MirrorScreenProps {
   onPressButton: (button: string) => void;
   onTakeScreenshot: () => void;
   onToggleSettings: () => void;
+  onOpenCommandBar: () => void;
   onDisconnect: () => void;
   onCanvasMouseEvent: (e: React.MouseEvent<HTMLCanvasElement>, action: string) => void;
   onWheel: (e: React.WheelEvent<HTMLCanvasElement>) => void;
@@ -33,6 +35,7 @@ export function MirrorScreen({
   onPressButton,
   onTakeScreenshot,
   onToggleSettings,
+  onOpenCommandBar,
   onDisconnect,
   onCanvasMouseEvent,
   onWheel,
@@ -59,6 +62,9 @@ export function MirrorScreen({
         </div>
 
         <div className="titlebar-group">
+          <button className="titlebar-btn" onClick={onOpenCommandBar} title="Commands (⌘K)">
+            <CommandLineIcon />
+          </button>
           <button className="titlebar-btn" onClick={onTakeScreenshot} title="Screenshot">
             <CameraIcon />
           </button>

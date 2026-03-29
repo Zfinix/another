@@ -15,6 +15,7 @@ export interface Settings {
   max_fps: number;
   video_bit_rate: number;
   video_codec: string;
+  audio: boolean;
 }
 
 export type FrameEvent =
@@ -27,9 +28,9 @@ export type Screen = "welcome" | "another";
 export type ThemePreference = "light" | "dark" | "auto";
 
 export const PRESETS: Record<string, Settings> = {
-  performance: { max_size: 720, max_fps: 30, video_bit_rate: 2000000, video_codec: "h264" },
-  balanced: { max_size: 1024, max_fps: 60, video_bit_rate: 8000000, video_codec: "h264" },
-  quality: { max_size: 1920, max_fps: 60, video_bit_rate: 24000000, video_codec: "h264" },
+  performance: { max_size: 720, max_fps: 30, video_bit_rate: 2000000, video_codec: "h264", audio: false },
+  balanced: { max_size: 1024, max_fps: 60, video_bit_rate: 8000000, video_codec: "h264", audio: false },
+  quality: { max_size: 1920, max_fps: 60, video_bit_rate: 24000000, video_codec: "h264", audio: false },
 };
 
 export const RESOLUTION_OPTIONS = [

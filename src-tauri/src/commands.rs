@@ -1,4 +1,5 @@
 use crate::adb;
+use crate::audio::{self, AudioHandle};
 use crate::control;
 use crate::scrcpy::{self, StreamSettings};
 use crate::state::{AppState, ScrcpySession};
@@ -49,12 +50,27 @@ pub async fn connect_device(
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let control_socket = Arc::new(Mutex::new(streams.control_socket));
 
+    let audio_handle = if let Some(audio_socket) = streams.audio_socket {
+        let handle = AudioHandle::new()
+            .map_err(|e| format!("Failed to init audio: {}", e))?;
+        let handle = Arc::new(handle);
+        let audio_shutdown = shutdown.clone();
+        let audio_ref = handle.clone();
+        tokio::spawn(async move {
+            audio::stream_audio(audio_socket, audio_ref, audio_shutdown).await;
+        });
+        Some(handle)
+    } else {
+        None
+    };
+
     let session = ScrcpySession {
         device_serial: serial.clone(),
         control_socket: control_socket.clone(),
         screen_width: streams.screen_width,
         screen_height: streams.screen_height,
         shutdown: shutdown.clone(),
+        audio: audio_handle,
     };
 
     let width = streams.screen_width;
@@ -85,6 +101,20 @@ pub async fn disconnect_device(state: State<'_, AppState>) -> Result<(), String>
     if let Some(s) = session.take() {
         s.shutdown.notify_one();
         scrcpy::stop_server(&s.device_serial, 27183).await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_muted(muted: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let session = state.session.lock().await;
+    let session = session.as_ref().ok_or("Not connected")?;
+    if let Some(audio) = &session.audio {
+        if muted {
+            audio.sink.set_volume(0.0);
+        } else {
+            audio.sink.set_volume(1.0);
+        }
     }
     Ok(())
 }
@@ -190,4 +220,47 @@ pub async fn press_button(button: String, state: State<'_, AppState>) -> Result<
     control::inject_keycode(&session.control_socket, "up", keycode, 0, 0)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn wifi_connect(address: String) -> Result<(), String> {
+    adb::connect_device(&address).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn wifi_disconnect(address: String) -> Result<(), String> {
+    adb::disconnect_device(&address).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_device_ip(serial: String) -> Result<Option<String>, String> {
+    adb::get_device_ip(&serial).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn wifi_enable(serial: String) -> Result<String, String> {
+    let ip = adb::get_device_ip(&serial)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Device is not connected to WiFi. Connect it to the same network as this computer.".to_string())?;
+
+    adb::tcpip(&serial, 5555)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let addr = format!("{}:5555", ip);
+    let mut connected = false;
+    for _ in 0..5 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+        if adb::connect_device(&addr).await.is_ok() {
+            connected = true;
+            break;
+        }
+    }
+
+    if !connected {
+        return Err(format!("Could not connect to {} -- make sure both devices are on the same WiFi network", addr));
+    }
+
+    Ok(addr)
 }

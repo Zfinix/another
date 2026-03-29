@@ -5,6 +5,7 @@ import {
 import { Dialog } from "@base-ui-components/react/dialog";
 import { Select } from "@base-ui-components/react/select";
 import { Slider } from "@base-ui-components/react/slider";
+import { Switch } from "@base-ui-components/react/switch";
 import type { Settings } from "../types";
 import { PRESETS, RESOLUTION_OPTIONS, CODEC_OPTIONS } from "../types";
 
@@ -127,6 +128,21 @@ export function SettingsDialog({
                 </Select.Portal>
               </Select.Root>
             </div>
+          </div>
+
+          <div className="settings-group">
+            <div className="settings-group-title">Audio</div>
+            <div className="setting-row">
+              <span className="setting-label">Forward device audio</span>
+              <Switch.Root
+                className="switch-root"
+                checked={settings.audio}
+                onCheckedChange={(checked) => onUpdateSetting("audio", checked)}
+              >
+                <Switch.Thumb className="switch-thumb" />
+              </Switch.Root>
+            </div>
+            <div className="setting-hint">Requires Android 11+</div>
           </div>
 
           <div className="settings-note">

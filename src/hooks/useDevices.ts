@@ -8,7 +8,13 @@ export function useDevices(showToast: (msg: string, type?: "error" | "info") => 
   const refreshDevices = useCallback(async () => {
     try {
       const devs = await invoke<Device[]>("list_devices");
-      setDevices(devs.filter((d) => d.state === "device"));
+      const connected = devs.filter((d) => d.state === "device");
+      const wifiModels = new Set(
+        connected.filter((d) => d.serial.includes(":")).map((d) => d.model)
+      );
+      setDevices(
+        connected.filter((d) => !(wifiModels.has(d.model) && !d.serial.includes(":")))
+      );
     } catch (e) {
       showToast(`${e}`);
     }

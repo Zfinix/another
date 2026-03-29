@@ -22,3 +22,4 @@ base64 = "0.22"
 byteorder = "1"
 anyhow = "1"
 socket2 = "0.5"
+rodio = { version = "0.19", default-features = false }
