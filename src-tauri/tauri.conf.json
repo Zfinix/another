@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
+    "targets": "all",
     "resources": ["resources/*"],
     "icon": [
       "icons/32x32.png",
@@ -38,7 +38,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "signingIdentity": "-",
+      "signingIdentity": "Developer ID Application",
       "minimumSystemVersion": "10.15"
     }
   }
