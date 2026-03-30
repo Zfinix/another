@@ -55,7 +55,7 @@ jobs:
         include:
           - runner: macos-latest
             arch: aarch64-apple-darwin
-          - runner: macos-13
+          - runner: macos-latest
             arch: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
     steps:
