@@ -22,7 +22,7 @@ function getMcpUrl(port: number) {
 function getMcpConfig(port: number) {
   return JSON.stringify({
     mcpServers: {
-      another: { url: getMcpUrl(port) },
+      another: { type: "http", url: getMcpUrl(port) },
     },
   }, null, 2);
 }
@@ -66,7 +66,7 @@ export function SettingsDialog({
     try {
       const running = await invoke<boolean>("get_mcp_status");
       setMcpRunning(running);
-    } catch {}
+    } catch { }
   }, []);
 
   useEffect(() => {
@@ -83,7 +83,7 @@ export function SettingsDialog({
         await invoke("stop_mcp_server");
       }
       await checkMcpStatus();
-    } catch {}
+    } catch { }
   }
 
   function handleCopyUrl() {
