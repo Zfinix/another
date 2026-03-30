@@ -24,12 +24,6 @@ fn adb_binary_name() -> &'static str {
 fn adb_path() -> PathBuf {
     let binary = adb_binary_name();
 
-    if let Some(dir) = RESOURCE_DIR.get() {
-        let bundled = dir.join("resources").join(binary);
-        if bundled.exists() {
-            return bundled;
-        }
-    }
     if let Ok(home) = std::env::var("HOME") {
         let sdk_adb = PathBuf::from(&home).join("Library/Android/sdk/platform-tools").join(binary);
         if sdk_adb.exists() {
@@ -46,6 +40,12 @@ fn adb_path() -> PathBuf {
         let sdk_adb = PathBuf::from(&android_home).join("platform-tools").join(binary);
         if sdk_adb.exists() {
             return sdk_adb;
+        }
+    }
+    if let Some(dir) = RESOURCE_DIR.get() {
+        let bundled = dir.join("resources").join(binary);
+        if bundled.exists() {
+            return bundled;
         }
     }
     PathBuf::from(binary)
