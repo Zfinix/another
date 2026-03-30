@@ -25,7 +25,8 @@ dist-ssr
 *.env
 *.env.*
 
+# Rust
+**/target/
 
-# Tauri
-src-tauri/target
+# Credentials
 credentials/

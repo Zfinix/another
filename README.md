@@ -41,6 +41,70 @@ Grab the latest release for your platform:
 - Screenshot capture
 - Automatic device detection via ADB
 - Light/dark/auto theme
+- MCP Server for AI agent control
+
+## MCP Server
+
+AI agents can control your Android device through the MCP (Model Context Protocol) protocol.
+
+The MCP server starts automatically with the app on port 7070. You can toggle it on/off in Settings.
+
+### Configuration
+
+Add to your MCP settings (Claude Code, Claude Desktop, Cursor, etc.):
+
+```json
+{
+  "mcpServers": {
+    "another": {
+      "type": "http",
+      "url": "http://localhost:7070/mcp"
+    }
+  }
+}
+```
+
+**Stdio mode** (for tools that support it):
+
+```json
+{
+  "mcpServers": {
+    "another": {
+      "command": "another-mcp",
+      "args": ["--scrcpy-server", "/path/to/scrcpy-server-v2.7"]
+    }
+  }
+}
+```
+
+### AI Agent Skill
+
+Install the [Another skill](https://clawhub.ai/zfinix/another) to teach your AI agent how to use the MCP tools:
+
+```sh
+npx skills add Zfinix/another@another-android
+```
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| another_list_devices | List connected Android devices |
+| another_connect_device | Connect to a device for control |
+| another_disconnect_device | Disconnect from current device |
+| another_take_screenshot | Capture device screen as PNG |
+| another_press_button | Press home/back/recents/power/volume |
+| another_send_text | Type text on device |
+| another_send_touch | Touch at screen coordinates |
+| another_send_scroll | Scroll at screen coordinates |
+| another_swipe | Swipe gesture between two points |
+| another_shell | Run adb shell command |
+| another_open_url | Open URL in Chrome by default (`use_system_handler` for app chooser / Google app) |
+| another_launch_app | Launch app by package name |
+| another_wifi_enable | Enable WiFi debugging |
+| another_wifi_connect | Connect to device by IP |
+| another_wifi_disconnect | Disconnect WiFi device |
+| another_get_device_ip | Get device WiFi IP address |
 
 ## Keyboard Shortcuts
 
@@ -49,7 +113,7 @@ Grab the latest release for your platform:
 | `⌘K` | Command Bar |
 | `⌘S` | Screenshot |
 | `⌘⇧R` | Record / Stop Recording |
-| `⌘=` / `⌘-` | Volume Up / Down |
+| `⌘+` / `⌘-` | Volume Up / Down |
 | `⌘M` | Mute / Unmute Audio |
 | `⌘H` | Home |
 | `⌘B` | Back |

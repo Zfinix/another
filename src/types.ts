@@ -2,6 +2,7 @@ export interface Device {
   serial: string;
   model: string;
   state: string;
+  wifi_available?: boolean;
 }
 
 export interface Toast {

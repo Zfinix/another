@@ -12,8 +12,13 @@ export function useDevices(showToast: (msg: string, type?: "error" | "info") => 
       const wifiModels = new Set(
         connected.filter((d) => d.serial.includes(":")).map((d) => d.model)
       );
+      const usbModels = new Set(
+        connected.filter((d) => !d.serial.includes(":")).map((d) => d.model)
+      );
       setDevices(
-        connected.filter((d) => !(wifiModels.has(d.model) && !d.serial.includes(":")))
+        connected
+          .filter((d) => !(usbModels.has(d.model) && d.serial.includes(":")))
+          .map((d) => ({ ...d, wifi_available: wifiModels.has(d.model) }))
       );
     } catch (e) {
       showToast(`${e}`);

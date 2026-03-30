@@ -1,6 +1,10 @@
+import { useState, useEffect, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   ChevronUpDownIcon,
   CheckIcon,
+  ChevronDownIcon,
+  ClipboardDocumentIcon,
 } from "@heroicons/react/24/outline";
 import { Dialog } from "@base-ui-components/react/dialog";
 import { Select } from "@base-ui-components/react/select";
@@ -8,6 +12,20 @@ import { Slider } from "@base-ui-components/react/slider";
 import { Switch } from "@base-ui-components/react/switch";
 import type { Settings } from "../types";
 import { PRESETS, RESOLUTION_OPTIONS, CODEC_OPTIONS } from "../types";
+
+const DEFAULT_MCP_PORT = 7070;
+
+function getMcpUrl(port: number) {
+  return `http://localhost:${port}/mcp`;
+}
+
+function getMcpConfig(port: number) {
+  return JSON.stringify({
+    mcpServers: {
+      another: { url: getMcpUrl(port) },
+    },
+  }, null, 2);
+}
 
 interface SettingsDialogProps {
   open: boolean;
@@ -18,6 +36,10 @@ interface SettingsDialogProps {
   onUpdateSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }
 
+function copyToClipboard(text: string) {
+  navigator.clipboard.writeText(text);
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -26,6 +48,58 @@ export function SettingsDialog({
   onApplyPreset,
   onUpdateSetting,
 }: SettingsDialogProps) {
+  const [mcpInstructionsOpen, setMcpInstructionsOpen] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedSnippet, setCopiedSnippet] = useState<string | null>(null);
+
+  const [mcpEnabled, setMcpEnabled] = useState(() => {
+    const stored = localStorage.getItem("mcp_enabled");
+    return stored === null ? true : stored === "true";
+  });
+  const [mcpPort] = useState(() => {
+    const stored = localStorage.getItem("mcp_port");
+    return stored ? parseInt(stored, 10) : DEFAULT_MCP_PORT;
+  });
+  const [mcpRunning, setMcpRunning] = useState(false);
+
+  const checkMcpStatus = useCallback(async () => {
+    try {
+      const running = await invoke<boolean>("get_mcp_status");
+      setMcpRunning(running);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    checkMcpStatus();
+  }, [checkMcpStatus]);
+
+  async function handleMcpToggle(enabled: boolean) {
+    setMcpEnabled(enabled);
+    localStorage.setItem("mcp_enabled", String(enabled));
+    try {
+      if (enabled) {
+        await invoke("start_mcp_server", { port: mcpPort });
+      } else {
+        await invoke("stop_mcp_server");
+      }
+      await checkMcpStatus();
+    } catch {}
+  }
+
+  function handleCopyUrl() {
+    copyToClipboard(getMcpUrl(mcpPort));
+    setCopiedUrl(true);
+    setTimeout(() => setCopiedUrl(false), 2000);
+  }
+
+  function handleCopySnippet(key: string, text: string) {
+    copyToClipboard(text);
+    setCopiedSnippet(key);
+    setTimeout(() => setCopiedSnippet(null), 2000);
+  }
+
+  const mcpConfig = getMcpConfig(mcpPort);
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -143,6 +217,52 @@ export function SettingsDialog({
               </Switch.Root>
             </div>
             <div className="setting-hint">Requires Android 11+</div>
+          </div>
+
+          <div className="settings-group">
+            <div className="setting-row">
+              <span className="settings-group-title" style={{ marginBottom: 0 }}>MCP Server</span>
+              <Switch.Root
+                className="switch-root"
+                checked={mcpEnabled}
+                onCheckedChange={handleMcpToggle}
+              >
+                <Switch.Thumb className="switch-thumb" />
+              </Switch.Root>
+            </div>
+            {mcpRunning && (
+              <div className="mcp-status">Running on port {mcpPort}</div>
+            )}
+            {mcpEnabled && (
+              <div className="mcp-content">
+                <p className="setting-hint" style={{ marginTop: 0, marginBottom: 12 }}>Let AI agents control your Android device</p>
+                <div className="mcp-url-row">
+                  <code className="mcp-url">{getMcpUrl(mcpPort)}</code>
+                  <button className="mcp-copy-btn" onClick={handleCopyUrl}>
+                    <ClipboardDocumentIcon />
+                    {copiedUrl ? "Copied" : "Copy URL"}
+                  </button>
+                </div>
+                <button className="mcp-collapsible-header mcp-sub-header" onClick={() => setMcpInstructionsOpen(!mcpInstructionsOpen)}>
+                  <span className="setting-label">Setup Instructions</span>
+                  <ChevronDownIcon className={`mcp-chevron ${mcpInstructionsOpen ? "open" : ""}`} />
+                </button>
+                {mcpInstructionsOpen && (
+                  <div className="mcp-instructions">
+                    <div className="mcp-snippet-block">
+                      <div className="mcp-snippet-header">
+                        <span className="mcp-snippet-title">Claude Code, Claude Desktop, Cursor, etc.</span>
+                        <button className="mcp-copy-btn mcp-copy-btn-sm" onClick={() => handleCopySnippet("config", mcpConfig)}>
+                          <ClipboardDocumentIcon />
+                          {copiedSnippet === "config" ? "Copied" : "Copy"}
+                        </button>
+                      </div>
+                      <pre className="mcp-code">{mcpConfig}</pre>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="settings-note">

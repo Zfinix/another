@@ -1,3 +1,4 @@
+import { useState, useEffect, useRef } from "react";
 import type React from "react";
 import {
   Cog6ToothIcon,
@@ -7,6 +8,7 @@ import {
   HomeIcon,
   Square2StackIcon,
   CommandLineIcon,
+  StopIcon,
 } from "@heroicons/react/24/outline";
 import type { Device } from "../types";
 
@@ -16,6 +18,8 @@ interface MirrorScreenProps {
   deviceSize: { width: number; height: number };
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   isMouseDown: React.MutableRefObject<boolean>;
+  recording: boolean;
+  onToggleRecording: () => void;
   onPressButton: (button: string) => void;
   onTakeScreenshot: () => void;
   onToggleSettings: () => void;
@@ -26,12 +30,20 @@ interface MirrorScreenProps {
   onKeyDown: (e: React.KeyboardEvent) => void;
 }
 
+function formatTime(seconds: number) {
+  const m = Math.floor(seconds / 60).toString().padStart(2, "0");
+  const s = (seconds % 60).toString().padStart(2, "0");
+  return `${m}:${s}`;
+}
+
 export function MirrorScreen({
   connectedDevice,
   connecting,
   deviceSize,
   canvasRef,
   isMouseDown,
+  recording,
+  onToggleRecording,
   onPressButton,
   onTakeScreenshot,
   onToggleSettings,
@@ -41,6 +53,20 @@ export function MirrorScreen({
   onWheel,
   onKeyDown,
 }: MirrorScreenProps) {
+  const [elapsed, setElapsed] = useState(0);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (recording) {
+      setElapsed(0);
+      intervalRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
+    } else {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  }, [recording]);
+
   return (
     <div className="another">
       <div className="titlebar" data-tauri-drag-region>
@@ -95,6 +121,17 @@ export function MirrorScreen({
             onWheel={onWheel}
             onContextMenu={(e) => e.preventDefault()}
           />
+        )}
+
+        {recording && (
+          <div className="recording-bar">
+            <span className="recording-dot" />
+            <span className="recording-time">{formatTime(elapsed)}</span>
+            <button className="recording-stop" onClick={onToggleRecording}>
+              <StopIcon />
+              Stop
+            </button>
+          </div>
         )}
       </div>
     </div>

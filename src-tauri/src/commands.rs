@@ -1,7 +1,6 @@
-use crate::adb;
+use another_core::{adb, control, scrcpy};
+use another_core::scrcpy::StreamSettings;
 use crate::audio::{self, AudioHandle};
-use crate::control;
-use crate::scrcpy::{self, StreamSettings};
 use crate::state::{AppState, ScrcpySession};
 use crate::video::{self, FrameEvent};
 use base64::Engine;
@@ -9,6 +8,7 @@ use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 #[tauri::command]
 pub async fn list_devices() -> Result<Vec<adb::Device>, String> {
@@ -263,4 +263,58 @@ pub async fn wifi_enable(serial: String) -> Result<String, String> {
     }
 
     Ok(addr)
+}
+
+#[tauri::command]
+pub async fn start_mcp_server(
+    port: u16,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut mcp = state.mcp.lock().await;
+
+    if mcp.cancel.is_some() {
+        return Ok(());
+    }
+
+    let scrcpy_server_path = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|dir| {
+            dir.join("resources")
+                .join("scrcpy-server-v2.7")
+                .to_string_lossy()
+                .to_string()
+        });
+
+    let ct = CancellationToken::new();
+    mcp.cancel = Some(ct.clone());
+    mcp.port = port;
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            if let Err(e) = another_mcp::start_sse_server(port, scrcpy_server_path, ct).await {
+                eprintln!("[mcp] server error: {}", e);
+            }
+        });
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_mcp_server(state: State<'_, AppState>) -> Result<(), String> {
+    let mut mcp = state.mcp.lock().await;
+    if let Some(ct) = mcp.cancel.take() {
+        ct.cancel();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_mcp_status(state: State<'_, AppState>) -> Result<bool, String> {
+    let mcp = state.mcp.lock().await;
+    Ok(mcp.cancel.is_some())
 }

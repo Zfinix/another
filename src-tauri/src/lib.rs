@@ -1,8 +1,5 @@
-mod adb;
 mod audio;
 mod commands;
-mod control;
-mod scrcpy;
 mod state;
 mod video;
 
@@ -17,7 +14,7 @@ pub fn run() {
         .manage(AppState::new())
         .setup(|app| {
             if let Ok(dir) = app.path().resource_dir() {
-                adb::set_resource_dir(dir);
+                another_core::adb::set_resource_dir(dir);
             }
 
             let device_menu = SubmenuBuilder::new(app, "Device")
@@ -66,6 +63,9 @@ pub fn run() {
             commands::wifi_disconnect,
             commands::wifi_enable,
             commands::get_device_ip,
+            commands::start_mcp_server,
+            commands::stop_mcp_server,
+            commands::get_mcp_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

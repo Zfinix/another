@@ -78,12 +78,12 @@ function App() {
   const updateSetting = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     const next = { ...settings, [key]: value };
     setSettings(next);
-    setActivePreset("");
+    if (key !== "audio") setActivePreset("");
     if (connectedDevice) scheduleReconnect(next);
   };
 
   const applyPreset = (name: string) => {
-    const next = PRESETS[name];
+    const next = { ...PRESETS[name], audio: settings.audio };
     setSettings(next);
     setActivePreset(name);
     if (connectedDevice) scheduleReconnect(next);
@@ -107,6 +107,14 @@ function App() {
 
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
+
+  useEffect(() => {
+    const mcpEnabled = localStorage.getItem("mcp_enabled") !== "false";
+    if (mcpEnabled) {
+      const port = parseInt(localStorage.getItem("mcp_port") || "7070", 10);
+      invoke("start_mcp_server", { port }).catch(() => {});
+    }
+  }, []);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -145,6 +153,8 @@ function App() {
           deviceSize={deviceSize}
           canvasRef={canvasRef}
           isMouseDown={isMouseDown}
+          recording={recording}
+          onToggleRecording={toggleRecording}
           onPressButton={pressButton}
           onTakeScreenshot={takeScreenshot}
           onToggleSettings={() => setShowSettings((s) => !s)}

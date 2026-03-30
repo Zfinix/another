@@ -134,10 +134,8 @@ export function WelcomeScreen({
               <div className="device-card-info">
                 <div className="device-card-name">{d.model}</div>
                 <div className="device-card-serial">
-                  {isWifiDevice(d.serial)
-                    ? <><span className="device-wifi-badge">WiFi</span>{d.serial}</>
-                    : truncateSerial(d.serial)
-                  }
+                  {d.wifi_available && <span className="device-wifi-badge">WiFi</span>}
+                  {truncateSerial(d.serial)}
                 </div>
               </div>
               <div className="device-card-actions">

@@ -545,6 +545,7 @@ body {
   background: var(--canvas-bg);
   overflow: hidden;
   outline: none;
+  position: relative;
 }
 
 .viewport canvas {
@@ -589,6 +590,73 @@ body {
   font-weight: 500;
 }
 
+/* ===== Recording Bar ===== */
+.recording-bar {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 6px 14px;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(12px);
+  border-radius: 20px;
+  z-index: 10;
+  animation: recording-fade-in 0.2s ease-out;
+}
+
+@keyframes recording-fade-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+.recording-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f44;
+  animation: recording-pulse 1s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes recording-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.recording-time {
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: #fff;
+  min-width: 40px;
+}
+
+.recording-stop {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: #f44;
+  border: none;
+  border-radius: 12px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.recording-stop:hover {
+  background: #e33;
+}
+
+.recording-stop svg {
+  width: 12px;
+  height: 12px;
+}
 
 /* ===== Dialog (Settings Panel) ===== */
 .dialog-backdrop {
@@ -1149,4 +1217,143 @@ body {
   text-align: center;
   font-size: 13px;
   color: var(--text-3);
+}
+
+/* ===== MCP Server Section ===== */
+.mcp-collapsible-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.mcp-chevron {
+  width: 14px;
+  height: 14px;
+  color: var(--text-3);
+  transition: transform 0.15s;
+}
+
+.mcp-chevron.open {
+  transform: rotate(180deg);
+}
+
+.mcp-status {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  margin-top: 6px;
+}
+
+.mcp-content {
+  margin-top: 14px;
+}
+
+.mcp-url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.mcp-url {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.mcp-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.mcp-copy-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.mcp-copy-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.mcp-copy-btn-sm {
+  padding: 3px 8px;
+  font-size: 10px;
+}
+
+.mcp-copy-btn-sm svg {
+  width: 11px;
+  height: 11px;
+}
+
+.mcp-sub-header {
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+
+.mcp-instructions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.mcp-snippet-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mcp-snippet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.mcp-snippet-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.mcp-code {
+  padding: 10px;
+  margin: 0;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--surface);
+  overflow-x: auto;
+  line-height: 1.5;
+  user-select: text;
+  -webkit-user-select: text;
 }

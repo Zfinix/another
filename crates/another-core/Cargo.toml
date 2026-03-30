@@ -1,0 +1,12 @@
+[package]
+name = "another-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+byteorder = "1"
+socket2 = "0.5"
+base64 = "0.22"
