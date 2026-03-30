@@ -2,6 +2,20 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Platforms to build"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - linux
+          - macos
+          - windows
+          - linux,macos
+          - linux,windows
+          - macos,windows
   push:
     tags:
       - "v*"
@@ -11,6 +25,10 @@ permissions:
 
 jobs:
   build-linux:
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platforms == 'all' ||
+      contains(inputs.platforms, 'linux')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +68,10 @@ jobs:
           prerelease: false
 
   build-macos:
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platforms == 'all' ||
+      contains(inputs.platforms, 'macos')
     strategy:
       matrix:
         include:
@@ -100,6 +122,10 @@ jobs:
           args: --target ${{ matrix.arch }}
 
   build-windows:
+    if: >-
+      github.event_name == 'push' ||
+      inputs.platforms == 'all' ||
+      contains(inputs.platforms, 'windows')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
