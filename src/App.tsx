@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Settings, Device } from "./types";
-import { PRESETS } from "./types";
+import type { Settings, Device, QuickActionId } from "./types";
+import { PRESETS, DEFAULT_PINNED_ACTIONS } from "./types";
 import { useTheme } from "./hooks/useTheme";
 import { useToasts } from "./hooks/useToasts";
 import { useDevices } from "./hooks/useDevices";
@@ -34,8 +34,21 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showCommandBar, setShowCommandBar] = useState(false);
   const [showMacros, setShowMacros] = useState(false);
-  const [settings, setSettings] = useState<Settings>(PRESETS.balanced);
-  const [activePreset, setActivePreset] = useState("balanced");
+  const [settings, setSettings] = useState<Settings>(() => {
+    const stored = localStorage.getItem("stream_settings");
+    if (stored) {
+      try { return { ...PRESETS.balanced, ...JSON.parse(stored) }; } catch { }
+    }
+    return PRESETS.balanced;
+  });
+  const [activePreset, setActivePreset] = useState(() => {
+    return localStorage.getItem("active_preset") || "balanced";
+  });
+
+  const [pinnedActions, setPinnedActions] = useState<QuickActionId[]>(() => {
+    localStorage.removeItem("pinned_actions");
+    return DEFAULT_PINNED_ACTIONS;
+  });
 
   const { themePref, setThemePref, cycleTheme } = useTheme();
   const { toasts, showToast } = useToasts();
@@ -46,10 +59,17 @@ function App() {
   const takeScreenshot = useCallback(async () => {
     try {
       const base64 = await invoke<string>("take_screenshot");
-      const link = document.createElement("a");
-      link.href = `data:image/png;base64,${base64}`;
-      link.download = `screenshot-${Date.now()}.png`;
-      link.click();
+      const savePath = localStorage.getItem("save_path");
+      if (savePath) {
+        const filename = `screenshot-${Date.now()}.png`;
+        const fullPath = `${savePath}/${filename}`;
+        await invoke("save_file", { path: fullPath, data: base64 });
+      } else {
+        const link = document.createElement("a");
+        link.href = `data:image/png;base64,${base64}`;
+        link.download = `screenshot-${Date.now()}.png`;
+        link.click();
+      }
       showToast("Screenshot saved", "info");
     } catch (e) {
       showToast(`Screenshot failed: ${e}`);
@@ -79,7 +99,7 @@ function App() {
     deviceSize,
     canvasRef,
     decoderRef,
-    isMouseDown,
+    isMouseDownRef,
     muted,
     recording,
     setMuted,
@@ -91,6 +111,8 @@ function App() {
     handleCanvasMouseEvent,
     handleWheel,
     handleKeyDown,
+    handleCompositionStart,
+    handleCompositionEnd,
   } = useConnection({
     settings,
     showToast,
@@ -125,7 +147,11 @@ function App() {
       adaptive.disableAdaptive();
     }
     setSettings(next);
-    if (key !== "audio" && key !== "adaptive") setActivePreset("");
+    localStorage.setItem("stream_settings", JSON.stringify(next));
+    if (key !== "audio" && key !== "adaptive") {
+      setActivePreset("");
+      localStorage.setItem("active_preset", "");
+    }
     if (connectedDevice) scheduleReconnect(next);
   };
 
@@ -133,6 +159,8 @@ function App() {
     const next = { ...PRESETS[name], audio: settings.audio };
     setSettings(next);
     setActivePreset(name);
+    localStorage.setItem("stream_settings", JSON.stringify(next));
+    localStorage.setItem("active_preset", name);
     adaptive.disableAdaptive();
     if (connectedDevice) scheduleReconnect(next);
   };
@@ -150,6 +178,7 @@ function App() {
     { id: "back", label: "Back", keys: [MOD, "B"], key: "b", section: "Device", action: () => pressButton("back") },
     { id: "recents", label: "Recent Apps", keys: [MOD, "R"], key: "r", section: "Device", action: () => pressButton("recents") },
     { id: "power", label: "Power Button", keys: [MOD, "P"], key: "p", section: "Device", action: () => pressButton("power") },
+    { id: "rotate", label: "Rotate Device", keys: [MOD, "⇧", "O"], key: "o", shift: true, section: "Device", action: () => { invoke("rotate_device").catch((e) => showToast(`Rotate failed: ${e}`)); } },
     { id: "cmdbar", label: "Command Bar", keys: [MOD, "K"], key: "k", section: "Actions", action: () => setShowCommandBar((s) => !s) },
     { id: "macro-toggle", label: macro.macroRecording ? "Stop Macro Recording" : "Record Macro", keys: [MOD, "⇧", "M"], key: "m", shift: true, section: "Macros", action: macro.toggleRecording },
     { id: "macro-play", label: "Play Last Macro", keys: [MOD, "⇧", "P"], key: "p", shift: true, section: "Macros", action: () => { if (macro.macros.length > 0) macro.playMacro(macro.macros[macro.macros.length - 1].name); } },
@@ -168,6 +197,7 @@ function App() {
       const port = parseInt(localStorage.getItem("mcp_port") || "7070", 10);
       invoke("start_mcp_server", { port }).catch(() => { });
     }
+    updater.checkForUpdates(true);
   }, []);
 
   useEffect(() => {
@@ -225,21 +255,26 @@ function App() {
           connectedDevice={connectedDevice}
           deviceSize={deviceSize}
           canvasRef={canvasRef}
-          isMouseDown={isMouseDown}
+          isMouseDownRef={isMouseDownRef}
           recording={recording}
+          muted={muted}
           macroRecording={macro.macroRecording}
+          pinnedActions={pinnedActions}
           adaptiveInfo={settings.adaptive ? { enabled: true, tierName: adaptive.metrics.tierName, fps: adaptive.metrics.fps } : undefined}
           onToggleRecording={toggleRecording}
           onToggleMacroRecording={macro.toggleRecording}
           onPressButton={pressButton}
-          onRotateDevice={() => invoke("rotate_device")}
           onTakeScreenshot={takeScreenshot}
           onToggleSettings={() => setShowSettings((s) => !s)}
           onOpenCommandBar={() => setShowCommandBar(true)}
           onDisconnect={disconnect}
+          onRotate={() => { invoke("rotate_device").catch((e) => showToast(`Rotate failed: ${e}`)); }}
+          onToggleMute={() => setMuted(!muted)}
           onCanvasMouseEvent={handleCanvasMouseEvent}
           onWheel={handleWheel}
           onKeyDown={handleKeyDown}
+          onCompositionStart={handleCompositionStart}
+          onCompositionEnd={handleCompositionEnd}
         />
       ) : null}
 
@@ -248,8 +283,10 @@ function App() {
         onOpenChange={setShowSettings}
         settings={settings}
         activePreset={activePreset}
+        pinnedActions={pinnedActions}
         onApplyPreset={applyPreset}
         onUpdateSetting={updateSetting}
+        onPinnedActionsChange={setPinnedActions}
       />
       <CommandBar
         open={showCommandBar}

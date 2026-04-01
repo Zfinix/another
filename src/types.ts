@@ -82,6 +82,20 @@ export const CODEC_OPTIONS = [
   { value: "h264", label: "H.264" },
 ];
 
+export type QuickActionId = "record" | "mute" | "volume_up" | "volume_down" | "power" | "macro-toggle" | "rotate";
+
+export const QUICK_ACTIONS: { id: QuickActionId; label: string }[] = [
+  { id: "record", label: "Record" },
+  { id: "mute", label: "Mute" },
+  { id: "volume_up", label: "Vol+" },
+  { id: "volume_down", label: "Vol-" },
+  { id: "power", label: "Power" },
+  { id: "macro-toggle", label: "Macro" },
+  { id: "rotate", label: "Rotate" },
+];
+
+export const DEFAULT_PINNED_ACTIONS: QuickActionId[] = [];
+
 export interface AdaptiveTier {
   max_size: number;
   max_fps: number;

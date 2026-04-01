@@ -54,13 +54,14 @@ export function useAdaptiveBitrate(opts: UseAdaptiveBitrateOptions) {
   const lastChangeAt = useRef(0);
   const manualOverride = useRef(false);
   const tierRef = useRef(tierIndex);
-  tierRef.current = tierIndex;
-
   const settingsRef = useRef(currentSettings);
-  settingsRef.current = currentSettings;
-
   const onTierChangeRef = useRef(onTierChange);
-  onTierChangeRef.current = onTierChange;
+
+  useEffect(() => {
+    tierRef.current = tierIndex;
+    settingsRef.current = currentSettings;
+    onTierChangeRef.current = onTierChange;
+  });
 
   const frameReceived = useCallback(() => {
     frameCount.current++;

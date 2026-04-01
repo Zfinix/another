@@ -4,6 +4,11 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use tokio::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn set_resource_dir(path: PathBuf) {
@@ -52,8 +57,11 @@ fn adb_path() -> PathBuf {
 }
 
 async fn run_adb(args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new(adb_path())
-        .args(args)
+    let mut cmd = Command::new(adb_path());
+    cmd.args(args);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
         .output()
         .await
         .map_err(|e| anyhow!("Failed to run adb: {}", e))?;
@@ -130,10 +138,14 @@ pub async fn remove_forward(serial: &str, local_port: u16) -> Result<()> {
 }
 
 pub async fn shell(serial: &str, cmd: &str) -> Result<tokio::process::Child> {
-    let child = Command::new(adb_path())
+    let mut command = Command::new(adb_path());
+    command
         .args(["-s", serial, "shell", cmd])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let child = command
         .spawn()
         .map_err(|e| anyhow!("Failed to spawn adb shell: {}", e))?;
     Ok(child)
@@ -183,6 +195,14 @@ pub async fn dump_ui_hierarchy(serial: &str) -> Result<String> {
     }
 
     Err(anyhow!("Failed to parse UI hierarchy output"))
+}
+
+pub async fn kill_server() {
+    let mut cmd = Command::new(adb_path());
+    cmd.args(["kill-server"]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = cmd.output().await;
 }
 
 pub async fn connect_device(address: &str) -> Result<()> {

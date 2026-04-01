@@ -480,6 +480,22 @@ pub async fn save_macros_order(dir: String, order: Vec<String>) -> Result<(), St
 }
 
 #[tauri::command]
+pub async fn save_file(path: String, data: String) -> Result<(), String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&data)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+    let file_path = PathBuf::from(&path);
+    if let Some(parent) = file_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    tokio::fs::write(&file_path, bytes)
+        .await
+        .map_err(|e| format!("Failed to write file: {}", e))
+}
+
+#[tauri::command]
 pub async fn wifi_connect(address: String) -> Result<(), String> {
     adb::connect_device(&address).await.map_err(|e| e.to_string())
 }

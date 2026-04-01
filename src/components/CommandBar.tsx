@@ -1,6 +1,20 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  Command,
+  CommandInput,
+  CommandList,
+  CommandEmpty,
+  CommandGroup,
+  CommandItem,
+  CommandShortcut,
+} from "@/components/ui/command";
+import {
+  Dialog,
+  DialogOverlay,
+  DialogPortal,
+} from "@/components/ui/dialog";
+import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 
-interface Command {
+interface CommandDef {
   id: string;
   label: string;
   keys: string[];
@@ -11,105 +25,51 @@ interface Command {
 interface CommandBarProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  commands: Command[];
+  commands: CommandDef[];
 }
 
 export function CommandBar({ open, onOpenChange, commands }: CommandBarProps) {
-  const [query, setQuery] = useState("");
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-
-  const filtered = query
-    ? commands.filter((c) => c.label.toLowerCase().includes(query.toLowerCase()))
-    : commands;
-
-  const sections = [...new Set(filtered.map((c) => c.section))];
-
-  useEffect(() => {
-    if (open) {
-      setQuery("");
-      setSelectedIndex(0);
-      setTimeout(() => inputRef.current?.focus(), 0);
-    }
-  }, [open]);
-
-  useEffect(() => {
-    setSelectedIndex(0);
-  }, [query]);
-
-  useEffect(() => {
-    const el = listRef.current?.querySelector("[data-selected]");
-    if (el) el.scrollIntoView({ block: "nearest" });
-  }, [selectedIndex]);
-
-  const run = useCallback((cmd: Command) => {
-    onOpenChange(false);
-    cmd.action();
-  }, [onOpenChange]);
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setSelectedIndex((i) => Math.min(i + 1, filtered.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setSelectedIndex((i) => Math.max(i - 1, 0));
-    } else if (e.key === "Enter" && filtered[selectedIndex]) {
-      e.preventDefault();
-      run(filtered[selectedIndex]);
-    } else if (e.key === "Escape") {
-      onOpenChange(false);
-    }
-  };
-
-  if (!open) return null;
-
-  let itemIndex = 0;
+  const sections = [...new Set(commands.map((c) => c.section))];
 
   return (
-    <div className="cmdbar-overlay" onClick={() => onOpenChange(false)}>
-      <div className="cmdbar" onClick={(e) => e.stopPropagation()}>
-        <input
-          ref={inputRef}
-          className="cmdbar-input"
-          placeholder="Type a command..."
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-        <div className="cmdbar-list" ref={listRef}>
-          {filtered.length === 0 && (
-            <div className="cmdbar-empty">No matching commands</div>
-          )}
-          {sections.map((section) => (
-            <div key={section}>
-              <div className="cmdbar-section">{section}</div>
-              {filtered
-                .filter((c) => c.section === section)
-                .map((cmd) => {
-                  const idx = itemIndex++;
-                  return (
-                    <div
-                      key={cmd.id}
-                      className={`cmdbar-item ${idx === selectedIndex ? "selected" : ""}`}
-                      data-selected={idx === selectedIndex ? "" : undefined}
-                      onClick={() => run(cmd)}
-                      onMouseEnter={() => setSelectedIndex(idx)}
-                    >
-                      <span className="cmdbar-item-label">{cmd.label}</span>
-                      {cmd.keys.length > 0 && (
-                        <span className="cmdbar-keys">
-                          {cmd.keys.map((k, i) => <kbd key={i} className="cmdbar-key">{k}</kbd>)}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogPortal>
+        <DialogOverlay />
+        <DialogPrimitive.Popup className="fixed top-20 left-1/2 -translate-x-1/2 w-[360px] max-w-[90vw] max-h-[400px] z-50 animate-in fade-in zoom-in-95 duration-100">
+          <Command className="rounded-xl bg-surface border border-border shadow-[0_16px_48px_rgba(0,0,0,0.3)] overflow-hidden">
+            <CommandInput placeholder="Type a command..." />
+            <CommandList>
+              <CommandEmpty>No matching commands</CommandEmpty>
+              {sections.map((section) => (
+                <CommandGroup key={section} heading={section}>
+                  {commands
+                    .filter((c) => c.section === section)
+                    .map((cmd) => (
+                      <CommandItem
+                        key={cmd.id}
+                        onSelect={() => {
+                          onOpenChange(false);
+                          cmd.action();
+                        }}
+                      >
+                        <span>{cmd.label}</span>
+                        {cmd.keys.length > 0 && (
+                          <CommandShortcut className="flex gap-1 tracking-normal">
+                            {cmd.keys.map((k, i) => (
+                              <kbd key={i} className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-[5px] bg-surface-3 border border-border rounded-[5px] text-[11px] font-sans font-medium text-text-2 shadow-[0_1px_0] shadow-border tracking-normal">
+                                {k}
+                              </kbd>
+                            ))}
+                          </CommandShortcut>
+                        )}
+                      </CommandItem>
+                    ))}
+                </CommandGroup>
+              ))}
+            </CommandList>
+          </Command>
+        </DialogPrimitive.Popup>
+      </DialogPortal>
+    </Dialog>
   );
 }

@@ -5,7 +5,7 @@ mod video;
 
 use state::AppState;
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -72,6 +72,7 @@ pub fn run() {
             commands::delete_macro_file,
             commands::rename_macro_file,
             commands::save_macros_order,
+            commands::save_file,
             commands::wifi_connect,
             commands::wifi_disconnect,
             commands::wifi_enable,
@@ -80,6 +81,23 @@ pub fn run() {
             commands::stop_mcp_server,
             commands::get_mcp_status,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let RunEvent::ExitRequested { .. } = &event {
+                let state = app.state::<AppState>();
+                let session = state.session.clone();
+                let mcp = state.mcp.clone();
+                tauri::async_runtime::block_on(async {
+                    if let Some(s) = session.lock().await.take() {
+                        s.shutdown.notify_one();
+                        another_core::scrcpy::stop_server(&s.device_serial, 27183).await;
+                    }
+                    if let Some(ct) = mcp.lock().await.cancel.take() {
+                        ct.cancel();
+                    }
+                    another_core::adb::kill_server().await;
+                });
+            }
+        });
 }
