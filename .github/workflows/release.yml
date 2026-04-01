@@ -28,10 +28,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       notes: ${{ steps.notes.outputs.notes }}
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Generate release notes
         id: notes
@@ -114,8 +125,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Another ${{ github.ref_name }}"
+          tagName: ${{ needs.release-notes.outputs.tag }}
+          releaseName: "Another ${{ needs.release-notes.outputs.tag }}"
           releaseBody: ${{ needs.release-notes.outputs.notes }}
           releaseDraft: false
           prerelease: false
@@ -171,8 +182,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Another ${{ github.ref_name }}"
+          tagName: ${{ needs.release-notes.outputs.tag }}
+          releaseName: "Another ${{ needs.release-notes.outputs.tag }}"
           releaseBody: ${{ needs.release-notes.outputs.notes }}
           releaseDraft: false
           prerelease: false
@@ -218,8 +229,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Another ${{ github.ref_name }}"
+          tagName: ${{ needs.release-notes.outputs.tag }}
+          releaseName: "Another ${{ needs.release-notes.outputs.tag }}"
           releaseBody: ${{ needs.release-notes.outputs.notes }}
           releaseDraft: false
           prerelease: false
