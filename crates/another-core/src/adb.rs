@@ -51,8 +51,17 @@ fn adb_path() -> PathBuf {
     PathBuf::from(binary)
 }
 
+fn adb_command() -> Command {
+    let mut cmd = Command::new(adb_path());
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 async fn run_adb(args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new(adb_path())
+    let output = adb_command()
         .args(args)
         .output()
         .await
@@ -130,7 +139,7 @@ pub async fn remove_forward(serial: &str, local_port: u16) -> Result<()> {
 }
 
 pub async fn shell(serial: &str, cmd: &str) -> Result<tokio::process::Child> {
-    let child = Command::new(adb_path())
+    let child = adb_command()
         .args(["-s", serial, "shell", cmd])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
