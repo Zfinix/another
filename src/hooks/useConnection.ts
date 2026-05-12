@@ -19,6 +19,7 @@ interface UseConnectionOptions {
   takeScreenshot: () => void;
   setShowSettings: (fn: (s: boolean) => boolean) => void;
   setThemePref: (fn: (p: "light" | "dark" | "auto") => "light" | "dark" | "auto") => void;
+  onToggleAlwaysOnTop: () => void;
   onFrameReceived?: () => void;
   onCodecFallback?: (codec: string) => void;
   onRecordEvent?: (event: MacroEvent) => void;
@@ -396,6 +397,8 @@ export function useConnection(opts: UseConnectionOptions) {
         opts.setShowSettings((s) => !s);
       } else if (id === "screenshot") {
         opts.takeScreenshot();
+      } else if (id === "always_on_top") {
+        opts.onToggleAlwaysOnTop();
       } else if (["home", "back", "recents", "volume_up", "volume_down", "power"].includes(id)) {
         pressButton(id);
       }

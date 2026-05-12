@@ -33,6 +33,8 @@ pub fn run() {
                 .build()?;
 
             let view_menu = SubmenuBuilder::new(app, "View")
+                .text("always_on_top", "Always on Top")
+                .separator()
                 .text("screenshot", "Screenshot")
                 .separator()
                 .text("toggle_theme", "Toggle Theme")

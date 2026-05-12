@@ -44,6 +44,7 @@ interface MirrorScreenProps {
   muted: boolean;
   macroRecording: boolean;
   pinnedActions: QuickActionId[];
+  alwaysOnTop: boolean;
   adaptiveInfo?: { enabled: boolean; tierName: string; fps: number };
   onToggleRecording: () => void;
   onToggleMacroRecording: () => void;
@@ -51,6 +52,7 @@ interface MirrorScreenProps {
   onTakeScreenshot: () => void;
   onToggleSettings: () => void;
   onOpenCommandBar: () => void;
+  onToggleAlwaysOnTop: () => void;
   onDisconnect: () => void;
   onRotate: () => void;
   onToggleMute: () => void;
@@ -81,6 +83,7 @@ export function MirrorScreen({
   muted,
   macroRecording,
   pinnedActions,
+  alwaysOnTop,
   adaptiveInfo,
   onToggleRecording,
   onToggleMacroRecording,
@@ -88,6 +91,7 @@ export function MirrorScreen({
   onTakeScreenshot,
   onToggleSettings,
   onOpenCommandBar,
+  onToggleAlwaysOnTop,
   onDisconnect,
   onRotate,
   onToggleMute,
@@ -193,6 +197,9 @@ export function MirrorScreen({
             ? <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={onToggleRecording} title={recording ? "Stop Recording" : "Record"}>{recording ? <StopIcon className="text-[#f44]" /> : <VideoCameraIcon />}</Button>
             : <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={onTakeScreenshot} title="Screenshot"><CameraIcon /></Button>}
           <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={onToggleSettings} title="Settings"><Cog6ToothIcon /></Button>
+          <Button variant="ghost" className={`${mirrorToolbarBtnClass} ${alwaysOnTop ? "text-brand" : ""}`} onClick={onToggleAlwaysOnTop} title={alwaysOnTop ? "Disable Always on Top" : "Always on Top"}>
+            <svg viewBox="0 0 24 24" fill={alwaysOnTop ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5" /><path d="M5 17h14" /><path d="M15 3H9v7l-2.5 7h11L15 10V3z" /></svg>
+          </Button>
           <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={onDisconnect} title="Disconnect"><XMarkIcon /></Button>
         </div>
       </div>

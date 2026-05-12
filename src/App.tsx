@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Settings, Device, QuickActionId } from "./types";
 import { PRESETS, DEFAULT_PINNED_ACTIONS } from "./types";
 import { useTheme } from "./hooks/useTheme";
@@ -49,6 +50,13 @@ function App() {
     localStorage.removeItem("pinned_actions");
     return DEFAULT_PINNED_ACTIONS;
   });
+
+  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
+  const toggleAlwaysOnTop = useCallback(async () => {
+    const next = !alwaysOnTop;
+    setAlwaysOnTop(next);
+    await getCurrentWindow().setAlwaysOnTop(next);
+  }, [alwaysOnTop]);
 
   const { themePref, setThemePref, cycleTheme } = useTheme();
   const { toasts, showToast } = useToasts();
@@ -119,6 +127,7 @@ function App() {
     takeScreenshot,
     setShowSettings: (fn) => setShowSettings(fn),
     setThemePref: (fn) => setThemePref(fn),
+    onToggleAlwaysOnTop: toggleAlwaysOnTop,
     onFrameReceived: () => adaptiveRef.current.frameReceived(),
     onCodecFallback: handleCodecFallback,
     onRecordEvent: macro.recordEvent,
@@ -186,7 +195,8 @@ function App() {
     { id: "macro-export", label: "Export All Macros", keys: [MOD, "⇧", "E"], key: "e", shift: true, section: "Macros", action: macro.exportAllMacros },
     { id: "macro-import", label: "Import Macros", keys: [MOD, "⇧", "I"], key: "i", shift: true, section: "Macros", action: macro.importMacros },
     { id: "check-updates", label: "Check for Updates", keys: [MOD, "⇧", "U"], key: "u", shift: true, section: "Actions", action: () => updater.checkForUpdates() },
-  ], [muted, recording, setMuted, toggleRecording, pressButton, takeScreenshot, cycleTheme, disconnect, macro.macroRecording, macro.toggleRecording, macro.macros, macro.playMacro, macro.exportAllMacros, macro.importMacros, updater.checkForUpdates]);
+    { id: "always-on-top", label: alwaysOnTop ? "Disable Always on Top" : "Always on Top", keys: [MOD, "⇧", "T"], key: "t", shift: true, section: "Actions", action: toggleAlwaysOnTop },
+  ], [muted, recording, setMuted, toggleRecording, pressButton, takeScreenshot, cycleTheme, disconnect, macro.macroRecording, macro.toggleRecording, macro.macros, macro.playMacro, macro.exportAllMacros, macro.importMacros, updater.checkForUpdates, alwaysOnTop, toggleAlwaysOnTop]);
 
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
@@ -260,6 +270,7 @@ function App() {
           muted={muted}
           macroRecording={macro.macroRecording}
           pinnedActions={pinnedActions}
+          alwaysOnTop={alwaysOnTop}
           adaptiveInfo={settings.adaptive ? { enabled: true, tierName: adaptive.metrics.tierName, fps: adaptive.metrics.fps } : undefined}
           onToggleRecording={toggleRecording}
           onToggleMacroRecording={macro.toggleRecording}
@@ -269,6 +280,7 @@ function App() {
           onOpenCommandBar={() => setShowCommandBar(true)}
           onDisconnect={disconnect}
           onRotate={() => { invoke("rotate_device").catch((e) => showToast(`Rotate failed: ${e}`)); }}
+          onToggleAlwaysOnTop={toggleAlwaysOnTop}
           onToggleMute={() => setMuted(!muted)}
           onCanvasMouseEvent={handleCanvasMouseEvent}
           onWheel={handleWheel}
