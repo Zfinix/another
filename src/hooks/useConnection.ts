@@ -19,6 +19,7 @@ interface UseConnectionOptions {
   takeScreenshot: () => void;
   setShowSettings: (fn: (s: boolean) => boolean) => void;
   setThemePref: (fn: (p: "light" | "dark" | "auto") => "light" | "dark" | "auto") => void;
+  onToggleAlwaysOnTop: () => void;
   onFrameReceived?: () => void;
   onCodecFallback?: (codec: string) => void;
   onRecordEvent?: (event: MacroEvent) => void;
@@ -36,12 +37,15 @@ export function useConnection(opts: UseConnectionOptions) {
   const decoderRef = useRef<VideoDecoder | null>(null);
   const pendingFrame = useRef<VideoFrame | null>(null);
   const rafId = useRef<number>(0);
-  const isMouseDown = useRef(false);
+  const isMouseDownRef = useRef(false);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isReconnecting = useRef(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunks = useRef<Blob[]>([]);
   const nativeSize = useRef({ width: 1080, height: 1920 });
+  const displaySizeRef = useRef({ width: 1080, height: 1920 });
+  const resizeSnapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isProgrammaticResize = useRef(false);
 
   const cleanupDecoder = useCallback(() => {
     if (rafId.current) {
@@ -64,7 +68,7 @@ export function useConnection(opts: UseConnectionOptions) {
 
   const setMuted = useCallback(async (m: boolean) => {
     setMutedState(m);
-    try { await invoke("set_muted", { muted: m }); } catch {}
+    try { await invoke("set_muted", { muted: m }); } catch { }
   }, []);
 
   const connectToDevice = useCallback(async (device: Device, s: Settings, silent = false) => {
@@ -100,7 +104,8 @@ export function useConnection(opts: UseConnectionOptions) {
                         nativeSize.current = { width: nativeSize.current.height, height: nativeSize.current.width };
                       }
                       invoke("update_screen_size", { width: nativeSize.current.width, height: nativeSize.current.height });
-                      const chromeH = 52;
+                      displaySizeRef.current = { width: f.displayWidth, height: f.displayHeight };
+                      const chromeH = 36;
                       const aspect = f.displayWidth / f.displayHeight;
                       const isLandscape = aspect > 1;
                       let viewW: number, viewH: number;
@@ -113,7 +118,10 @@ export function useConnection(opts: UseConnectionOptions) {
                         viewH = maxViewH;
                         viewW = Math.round(maxViewH * aspect);
                       }
-                      getCurrentWindow().setSize(new LogicalSize(Math.max(viewW, 280), viewH + chromeH));
+                      isProgrammaticResize.current = true;
+                      getCurrentWindow().setSize(new LogicalSize(Math.max(viewW, 280), viewH + chromeH)).finally(() => {
+                        isProgrammaticResize.current = false;
+                      });
                       return { width: f.displayWidth, height: f.displayHeight };
                     });
                   }
@@ -132,7 +140,7 @@ export function useConnection(opts: UseConnectionOptions) {
           };
           VideoDecoder.isConfigSupported(config).then((result) => {
             if (!result.supported) {
-              showToast("H.265 not supported on this platform, falling back to H.264", "info");
+              // showToast("H.265 not supported on this platform, falling back to H.264", "info");
               opts.onCodecFallback?.("h264");
               return;
             }
@@ -165,17 +173,28 @@ export function useConnection(opts: UseConnectionOptions) {
         settings: streamSettings,
       });
       nativeSize.current = { width, height };
+      displaySizeRef.current = { width, height };
       setDeviceSize({ width, height });
       setConnectedDevice(device);
       setScreen("another");
 
-      const chromeH = 52;
-      const maxViewH = 860;
+      const chromeH = 36;
       const aspect = width / height;
-      const viewW = Math.round(maxViewH * aspect);
-      const totalH = maxViewH + chromeH;
+      const isLandscape = aspect > 1;
+      let viewW: number, viewH: number;
+      if (isLandscape) {
+        const maxViewW = 860;
+        viewW = maxViewW;
+        viewH = Math.round(maxViewW / aspect);
+      } else {
+        const maxViewH = 860;
+        viewH = maxViewH;
+        viewW = Math.round(maxViewH * aspect);
+      }
       const win = getCurrentWindow();
-      await win.setSize(new LogicalSize(Math.max(viewW, 280), totalH));
+      isProgrammaticResize.current = true;
+      await win.setSize(new LogicalSize(Math.max(viewW, 280), viewH + chromeH));
+      isProgrammaticResize.current = false;
     } catch (e) {
       if (!silent) showToast(`Failed to connect: ${e}`);
     } finally {
@@ -186,12 +205,12 @@ export function useConnection(opts: UseConnectionOptions) {
 
   const disconnect = useCallback(async () => {
     cleanupDecoder();
-    try { await invoke("disconnect_device"); } catch {}
+    try { await invoke("disconnect_device"); } catch { }
     setConnectedDevice(null);
     setScreen("welcome");
     try {
       await getCurrentWindow().setSize(new LogicalSize(380, 750));
-    } catch {}
+    } catch { }
   }, [cleanupDecoder]);
 
   const scheduleReconnect = useCallback((s: Settings) => {
@@ -217,14 +236,34 @@ export function useConnection(opts: UseConnectionOptions) {
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) recordedChunks.current.push(e.data);
     };
-    recorder.onstop = () => {
+    recorder.onstop = async () => {
       const blob = new Blob(recordedChunks.current, { type: "video/webm" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `recording-${Date.now()}.webm`;
-      link.click();
-      URL.revokeObjectURL(url);
+      const savePath = localStorage.getItem("save_path");
+      if (savePath) {
+        try {
+          const buffer = await blob.arrayBuffer();
+          const bytes = new Uint8Array(buffer);
+          let binary = "";
+          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+          const base64 = btoa(binary);
+          const filename = `recording-${Date.now()}.webm`;
+          await invoke("save_file", { path: `${savePath}/${filename}`, data: base64 });
+        } catch {
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `recording-${Date.now()}.webm`;
+          link.click();
+          URL.revokeObjectURL(url);
+        }
+      } else {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `recording-${Date.now()}.webm`;
+        link.click();
+        URL.revokeObjectURL(url);
+      }
       recordedChunks.current = [];
       recorderRef.current = null;
       setRecording(false);
@@ -238,7 +277,7 @@ export function useConnection(opts: UseConnectionOptions) {
 
   const pressButton = useCallback(async (button: string) => {
     opts.onRecordEvent?.({ type: "button", button });
-    try { await invoke("press_button", { button }); } catch {}
+    try { await invoke("press_button", { button }); } catch { }
   }, []);
 
   const handleCanvasMouseEvent = async (e: React.MouseEvent<HTMLCanvasElement>, action: string) => {
@@ -249,7 +288,7 @@ export function useConnection(opts: UseConnectionOptions) {
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
     opts.onRecordEvent?.({ type: "touch", action, x, y });
-    try { await invoke("send_touch", { action, x, y }); } catch {}
+    try { await invoke("send_touch", { action, x, y }); } catch { }
   };
 
   const handleWheel = async (e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -261,15 +300,26 @@ export function useConnection(opts: UseConnectionOptions) {
     const y = (e.clientY - rect.top) / rect.height;
     const dy = e.deltaY > 0 ? -1 : 1;
     opts.onRecordEvent?.({ type: "scroll", x, y, dx: 0, dy });
-    try { await invoke("send_scroll", { x, y, dx: 0, dy }); } catch {}
+    try { await invoke("send_scroll", { x, y, dx: 0, dy }); } catch { }
+  };
+
+  const composingRef = useRef(false);
+
+  const handleCompositionStart = () => { composingRef.current = true; };
+  const handleCompositionEnd = async (e: React.CompositionEvent) => {
+    composingRef.current = false;
+    if (!connectedDevice || !e.data) return;
+    opts.onRecordEvent?.({ type: "text", text: e.data });
+    try { await invoke("send_text", { text: e.data }); } catch { }
   };
 
   const handleKeyDown = async (e: React.KeyboardEvent) => {
     if (!connectedDevice) return;
+    if (composingRef.current || e.key === "Dead") return;
     e.preventDefault();
-    if (e.key.length === 1) {
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
       opts.onRecordEvent?.({ type: "text", text: e.key });
-      try { await invoke("send_text", { text: e.key }); } catch {}
+      try { await invoke("send_text", { text: e.key }); } catch { }
     } else {
       const keyMap: Record<string, number> = {
         Enter: 66, Backspace: 67, Delete: 112,
@@ -282,10 +332,59 @@ export function useConnection(opts: UseConnectionOptions) {
         try {
           await invoke("send_key", { keycode, action: "down" });
           await invoke("send_key", { keycode, action: "up" });
-        } catch {}
+        } catch { }
       }
     }
   };
+
+  useEffect(() => {
+    if (screen !== "another") return;
+    let cancelled = false;
+    const win = getCurrentWindow();
+    const chromeH = 36;
+    const resizeUnlisten = win.onResized(() => {
+      if (isProgrammaticResize.current || cancelled) return;
+      if (resizeSnapTimer.current) clearTimeout(resizeSnapTimer.current);
+      resizeSnapTimer.current = setTimeout(() => {
+        void (async () => {
+          if (cancelled || isProgrammaticResize.current) return;
+          try {
+            const factor = await win.scaleFactor();
+            const inner = await win.innerSize();
+            const logical = inner.toLogical(factor);
+            const cw = logical.width;
+            const ch = logical.height - chromeH;
+            if (ch < 200 || cw < 240) return;
+            const { width: dw, height: dh } = displaySizeRef.current;
+            const targetAspect = dw / dh;
+            const currentAspect = cw / ch;
+            if (Math.abs(currentAspect - targetAspect) < 0.01) return;
+            let newW: number;
+            let newH: number;
+            if (currentAspect > targetAspect) {
+              newH = ch;
+              newW = Math.floor(ch * targetAspect);
+            } else {
+              newW = cw;
+              newH = Math.floor(cw / targetAspect);
+            }
+            newW = Math.min(Math.max(newW, 280), cw);
+            newH = Math.min(Math.max(newH, 240), ch);
+            isProgrammaticResize.current = true;
+            await win.setSize(new LogicalSize(newW, newH + chromeH));
+            isProgrammaticResize.current = false;
+          } catch {
+            isProgrammaticResize.current = false;
+          }
+        })();
+      }, 120);
+    });
+    return () => {
+      cancelled = true;
+      if (resizeSnapTimer.current) clearTimeout(resizeSnapTimer.current);
+      void resizeUnlisten.then((fn) => fn());
+    };
+  }, [screen]);
 
   useEffect(() => {
     const unlisten = listen<string>("menu-event", (event) => {
@@ -298,6 +397,8 @@ export function useConnection(opts: UseConnectionOptions) {
         opts.setShowSettings((s) => !s);
       } else if (id === "screenshot") {
         opts.takeScreenshot();
+      } else if (id === "always_on_top") {
+        opts.onToggleAlwaysOnTop();
       } else if (["home", "back", "recents", "volume_up", "volume_down", "power"].includes(id)) {
         pressButton(id);
       }
@@ -312,7 +413,7 @@ export function useConnection(opts: UseConnectionOptions) {
     deviceSize,
     canvasRef,
     decoderRef,
-    isMouseDown,
+    isMouseDownRef,
     muted,
     recording,
     setMuted,
@@ -324,5 +425,7 @@ export function useConnection(opts: UseConnectionOptions) {
     handleCanvasMouseEvent,
     handleWheel,
     handleKeyDown,
+    handleCompositionStart,
+    handleCompositionEnd,
   };
 }

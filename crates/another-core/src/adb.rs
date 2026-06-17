@@ -4,6 +4,11 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use tokio::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn set_resource_dir(path: PathBuf) {
@@ -192,6 +197,14 @@ pub async fn dump_ui_hierarchy(serial: &str) -> Result<String> {
     }
 
     Err(anyhow!("Failed to parse UI hierarchy output"))
+}
+
+pub async fn kill_server() {
+    let mut cmd = Command::new(adb_path());
+    cmd.args(["kill-server"]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = cmd.output().await;
 }
 
 pub async fn connect_device(address: &str) -> Result<()> {
