@@ -91,14 +91,16 @@ jobs:
       github.event_name == 'push' ||
       inputs.platforms == 'all' ||
       contains(inputs.platforms, 'linux')
-    runs-on: ubuntu-latest
+    # Oldest runner, so the AppImage links a glibc old enough to run anywhere.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf libasound2-dev
+          sudo apt-get install -y libayatana-appindicator3-dev || sudo apt-get install -y libappindicator3-dev
 
       - uses: oven-sh/setup-bun@v2
 

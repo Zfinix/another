@@ -1,6 +1,6 @@
 [package]
 name = "Another"
-version = "0.4.1"
+version = "0.4.2"
 description = "Android screen another and control"
 authors = ["you"]
 edition = "2021"
