@@ -148,12 +148,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ needs.release-notes.outputs.tag }}"
-          ZSYNC=$(ls src-tauri/target/release/bundle/appimage/*.AppImage.zsync 2>/dev/null | head -1)
-          if [ -z "$ZSYNC" ]; then
-            echo "::warning::No .zsync generated; AppImageUpdate support is missing from this release."
-            exit 0
+          DIR=src-tauri/target/release/bundle/appimage
+          APPIMAGE=$(ls "$DIR"/*.AppImage | head -1)
+          if ! command -v zsyncmake >/dev/null; then
+            echo "::error::zsyncmake is missing; install the zsync package so AppImage delta updates can be published."
+            exit 1
           fi
-          gh release upload "$TAG" "$ZSYNC" --clobber
+          if [ ! -f "$APPIMAGE.zsync" ]; then
+            zsyncmake "$APPIMAGE" -u "$(basename "$APPIMAGE")"
+          fi
+          gh release upload "$TAG" "$APPIMAGE.zsync" --clobber
 
   build-macos:
     needs: release-notes
