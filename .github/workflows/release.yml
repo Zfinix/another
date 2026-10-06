@@ -148,12 +148,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ needs.release-notes.outputs.tag }}"
-          DIR=src-tauri/target/release/bundle/appimage
-          APPIMAGE=$(ls "$DIR"/*.AppImage | head -1)
           if ! command -v zsyncmake >/dev/null; then
-            echo "::error::zsyncmake is missing; install the zsync package so AppImage delta updates can be published."
+            sudo apt-get install -y zsync
+          fi
+          APPIMAGE=$(find . -type f -name '*.AppImage' | head -1)
+          if [ -z "$APPIMAGE" ]; then
+            echo "::error::No AppImage found to generate a .zsync for."
             exit 1
           fi
+          echo "AppImage: $APPIMAGE"
           if [ ! -f "$APPIMAGE.zsync" ]; then
             zsyncmake "$APPIMAGE" -u "$(basename "$APPIMAGE")"
           fi
