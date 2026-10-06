@@ -99,7 +99,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf libasound2-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf libasound2-dev zsync
           sudo apt-get install -y libayatana-appindicator3-dev || sudo apt-get install -y libappindicator3-dev
 
       - uses: oven-sh/setup-bun@v2
@@ -120,6 +120,15 @@ jobs:
           curl -fsSL -o /tmp/platform-tools.zip https://dl.google.com/android/repository/platform-tools-latest-linux.zip
           unzip -jo /tmp/platform-tools.zip platform-tools/adb -d src-tauri/resources/
 
+      - name: Compute AppImage update information
+        run: |
+          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          PRODUCT=$(jq -r .productName src-tauri/tauri.conf.json)
+          TAG="${{ needs.release-notes.outputs.tag }}"
+          ZSYNC_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${PRODUCT}_${VERSION}_amd64.AppImage.zsync"
+          echo "UPDATE_INFORMATION=zsync|${ZSYNC_URL}" >> "$GITHUB_ENV"
+          echo "Embedding update information: zsync|${ZSYNC_URL}"
+
       - name: Build Tauri
         uses: tauri-apps/tauri-action@v0
         env:
@@ -133,6 +142,18 @@ jobs:
           releaseDraft: false
           prerelease: false
           updaterJsonKeepUniversal: true
+
+      - name: Publish AppImage zsync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.release-notes.outputs.tag }}"
+          ZSYNC=$(ls src-tauri/target/release/bundle/appimage/*.AppImage.zsync 2>/dev/null | head -1)
+          if [ -z "$ZSYNC" ]; then
+            echo "::warning::No .zsync generated; AppImageUpdate support is missing from this release."
+            exit 0
+          fi
+          gh release upload "$TAG" "$ZSYNC" --clobber
 
   build-macos:
     needs: release-notes
