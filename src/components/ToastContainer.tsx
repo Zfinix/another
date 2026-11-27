@@ -12,9 +12,9 @@ export function ToastContainer({ toasts }: ToastContainerProps) {
         <div
           key={t.id}
           className={cn(
-            "px-[18px] py-2 rounded-lg text-xs font-medium max-w-[340px] text-center backdrop-blur-2xl animate-in fade-in slide-in-from-bottom-2 duration-250",
-            t.type === "error" && "bg-red-400/95 text-white",
-            t.type === "info" && "bg-surface text-foreground border border-border"
+            "px-3.5 py-2 rounded-[10px] text-[12px] leading-[1.45] max-w-[min(340px,calc(100vw-32px))] text-center backdrop-blur-xl border shadow-(--float-shadow) animate-in fade-in slide-in-from-bottom-2 duration-200",
+            t.type === "error" && "bg-popover/95 border-danger/40 text-danger",
+            t.type === "info" && "bg-popover/95 border-border text-foreground"
           )}
         >
           {t.message}
