@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 another-core = { path = "../crates/another-core" }
@@ -31,6 +31,7 @@ getrandom = "0.2"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2.10.0"
+tauri-plugin-notification = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

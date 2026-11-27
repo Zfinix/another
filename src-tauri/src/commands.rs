@@ -187,6 +187,7 @@ pub fn set_native_video_frame(x: f64, y: f64, width: f64, height: f64) {
 
 #[tauri::command]
 pub async fn disconnect_device(state: State<'_, AppState>) -> Result<(), String> {
+    native_video::detach();
     let mut session = state.session.lock().await;
     if let Some(s) = session.take() {
         s.shutdown.notify_one();
@@ -597,18 +598,21 @@ pub async fn get_device_ip(serial: String) -> Result<Option<String>, String> {
     adb::get_device_ip(&serial).await.map_err(|e| e.to_string())
 }
 
+const DEFAULT_WIFI_PORT: u16 = 5555;
+
 #[tauri::command]
-pub async fn wifi_enable(serial: String) -> Result<String, String> {
+pub async fn wifi_enable(serial: String, port: Option<u16>) -> Result<String, String> {
+    let port = port.unwrap_or(DEFAULT_WIFI_PORT);
     let ip = adb::get_device_ip(&serial)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Device is not connected to WiFi. Connect it to the same network as this computer.".to_string())?;
 
-    adb::tcpip(&serial, 5555)
+    adb::tcpip(&serial, port)
         .await
         .map_err(|e| e.to_string())?;
 
-    let addr = format!("{}:5555", ip);
+    let addr = format!("{}:{}", ip, port);
     let mut connected = false;
     for _ in 0..5 {
         tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
@@ -759,4 +763,176 @@ pub async fn read_text_file(path: String) -> Result<String, String> {
 pub async fn get_mcp_status(state: State<'_, AppState>) -> Result<bool, String> {
     let mcp = state.mcp.lock().await;
     Ok(mcp.cancel.is_some())
+}
+
+#[tauri::command]
+pub async fn device_screenshot(serial: String) -> Result<Option<String>, String> {
+    let png = adb::lock_screen_capture(&serial).await.map_err(|e| e.to_string())?;
+    Ok(png
+        .filter(|data| !data.is_empty())
+        .map(|data| base64::engine::general_purpose::STANDARD.encode(&data)))
+}
+
+#[tauri::command]
+pub async fn adb_pair(address: String, code: String) -> Result<(), String> {
+    adb::pair(&address, &code).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn phone_notifications(
+    serial: String,
+) -> Result<Vec<another_core::notifications::PhoneNotification>, String> {
+    adb::notifications(&serial).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_phone_app(serial: String, package: String) -> Result<(), String> {
+    adb::launch_app(&serial, &package).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_stay_on(serial: String, value: String) -> Result<String, String> {
+    adb::set_stay_on(&serial, &value).await.map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub modified_ms: u64,
+}
+
+#[tauri::command]
+pub async fn list_files(dir: String, prefix: String) -> Result<Vec<FileEntry>, String> {
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut files: Vec<FileEntry> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if !name.starts_with(&prefix) {
+                return None;
+            }
+            let meta = entry.metadata().ok()?;
+            let modified_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis() as u64);
+            Some(FileEntry { path: entry.path().to_string_lossy().into_owned(), name, size: meta.len(), modified_ms })
+        })
+        .collect();
+    files.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
+    Ok(files)
+}
+
+#[tauri::command]
+pub async fn delete_file(path: String) -> Result<(), String> {
+    std::fs::remove_file(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn device_info(serial: String) -> Result<adb::DeviceInfo, String> {
+    adb::device_info(&serial).await.map_err(|e| e.to_string())
+}
+
+const CLI_NAME: &str = "another-cli";
+const CLI_COMMAND: &str = "another";
+const CLI_INSTALL_DIR: &str = "/usr/local/bin";
+
+fn cli_link() -> PathBuf {
+    PathBuf::from(CLI_INSTALL_DIR).join(CLI_COMMAND)
+}
+
+/// True when the `another` link on the PATH points at a copy of this app's CLI.
+fn link_is_ours(link: &std::path::Path) -> bool {
+    std::fs::read_link(link)
+        .map(|target| target.file_name().is_some_and(|name| name == CLI_NAME))
+        .unwrap_or(false)
+}
+
+fn bundled_cli() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let path = exe
+        .parent()
+        .ok_or("The app has no folder")?
+        .join(CLI_NAME);
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(format!("{} is not bundled with this build of Another", CLI_NAME))
+    }
+}
+
+/// Where the `another` command is installed on the PATH, if this app installed it.
+#[tauri::command]
+pub async fn cli_status() -> Option<String> {
+    let link = cli_link();
+    (link.exists() && link_is_ours(&link)).then(|| link.to_string_lossy().into_owned())
+}
+
+/// Links the bundled CLI into /usr/local/bin as `another`, asking for an administrator password
+/// through macOS only when the folder is not writable.
+#[cfg(unix)]
+#[tauri::command]
+pub async fn install_cli() -> Result<String, String> {
+    let source = bundled_cli()?;
+    let link = cli_link();
+    if link.symlink_metadata().is_ok() && !link_is_ours(&link) {
+        return Err(format!("{} already has a different command named {}", CLI_INSTALL_DIR, CLI_COMMAND));
+    }
+    let direct = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(CLI_INSTALL_DIR)?;
+        if link.symlink_metadata().is_ok() {
+            std::fs::remove_file(&link)?;
+        }
+        std::os::unix::fs::symlink(&source, &link)
+    })();
+    match direct {
+        Ok(()) => Ok(link.to_string_lossy().into_owned()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let quote = |p: &std::path::Path| p.to_string_lossy().replace('\'', "'\\''");
+            let shell = format!(
+                "mkdir -p '{dir}' && ln -sf '{src}' '{dst}'",
+                dir = CLI_INSTALL_DIR,
+                src = quote(&source),
+                dst = quote(&link),
+            );
+            let script = format!(
+                "do shell script \"{}\" with prompt \"Another wants to add the another command to your Terminal.\" with administrator privileges",
+                shell.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            let output = tokio::process::Command::new("osascript")
+                .args(["-e", &script])
+                .output()
+                .await
+                .map_err(|e| e.to_string())?;
+            if output.status.success() {
+                Ok(link.to_string_lossy().into_owned())
+            } else {
+                let message = String::from_utf8_lossy(&output.stderr);
+                if message.contains("-128") {
+                    Err("Cancelled".to_string())
+                } else {
+                    Err(message.trim().to_string())
+                }
+            }
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(not(unix))]
+#[tauri::command]
+pub async fn install_cli() -> Result<String, String> {
+    Err(format!("Add the folder that holds {} to your PATH to use it as {}", CLI_NAME, CLI_COMMAND))
+}
+
+#[tauri::command]
+pub async fn set_window_blur(window: tauri::WebviewWindow, percent: u32) -> Result<(), String> {
+    crate::window_blur::set_blur(&window, percent).map_err(|e| e.to_string())
 }

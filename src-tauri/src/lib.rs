@@ -3,6 +3,11 @@ mod commands;
 mod state;
 #[cfg(target_os = "macos")]
 mod native_video;
+#[cfg(target_os = "macos")]
+mod window_blur;
+#[cfg(not(target_os = "macos"))]
+#[path = "window_blur_stub.rs"]
+mod window_blur;
 #[cfg(not(target_os = "macos"))]
 #[path = "native_video_stub.rs"]
 mod native_video;
@@ -93,6 +98,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         .manage(AppState::new())
@@ -191,6 +197,17 @@ pub fn run() {
             commands::report_ui_state,
             commands::take_pending_commands,
             commands::read_text_file,
+            commands::device_screenshot,
+            commands::adb_pair,
+            commands::phone_notifications,
+            commands::open_phone_app,
+            commands::set_stay_on,
+            commands::list_files,
+            commands::delete_file,
+            commands::cli_status,
+            commands::install_cli,
+            commands::set_window_blur,
+            commands::device_info,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

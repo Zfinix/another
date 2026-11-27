@@ -51,6 +51,8 @@ struct Placement {
 }
 
 static PLACEMENT: Mutex<Option<Placement>> = Mutex::new(None);
+/// Matches the rounded video frame in the mirror window.
+const VIDEO_CORNER_RADIUS: f64 = 12.0;
 static FRAME: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
 static ACTIVE: Mutex<Option<Weak<DecodeContext>>> = Mutex::new(None);
 
@@ -223,24 +225,31 @@ impl NativeVideo {
 impl Drop for NativeVideo {
     fn drop(&mut self) {
         self.invalidate();
-        let mut still_current = false;
         if let Ok(mut placement) = PLACEMENT.lock() {
             if placement
                 .as_ref()
                 .is_some_and(|p| Arc::ptr_eq(&p.layer, &self.context.layer))
             {
                 *placement = None;
-                still_current = true;
             }
         }
         let layer = self.context.layer.clone();
-        let _ = self.window.with_webview(move |webview| unsafe {
+        let _ = self.window.with_webview(move |_| {
             layer.0.removeFromSuperlayer();
-            if still_current {
-                set_draws_background(webview.inner() as *mut AnyObject, true);
-            }
         });
     }
+}
+
+/// Takes the video layer off the webview right away, so the last frame never lingers behind the
+/// translucent window once mirroring stops. Dropping the decoder later is then a no-op.
+pub fn detach() {
+    let Some(placement) = PLACEMENT.lock().ok().and_then(|mut p| p.take()) else {
+        return;
+    };
+    let layer = placement.layer.clone();
+    let _ = placement.window.with_webview(move |_| {
+        layer.0.removeFromSuperlayer();
+    });
 }
 
 /// Watches decoded frames for a change around (x, y), given as fractions of the frame size. The
@@ -348,6 +357,8 @@ unsafe fn attach_layer(view: *mut AnyObject) -> Option<Retained<CALayer>> {
     let layer = CALayer::new();
     layer.setContentsGravity(kCAGravityResizeAspect);
     layer.setOpaque(true);
+    layer.setCornerRadius(VIDEO_CORNER_RADIUS);
+    layer.setMasksToBounds(true);
     host.insertSublayer_atIndex(&layer, 0);
     set_draws_background(view as *const AnyObject as *mut AnyObject, false);
     Some(layer)
