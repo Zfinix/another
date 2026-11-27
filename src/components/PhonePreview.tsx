@@ -8,6 +8,7 @@ interface PhonePreviewProps {
   onMirror: () => void;
   mirrorDisabled?: boolean;
   mirrorBusy?: boolean;
+  mirrorLabel?: string;
 }
 
 function clock() {
@@ -16,7 +17,7 @@ function clock() {
 
 const BUTTON_RADIUS = 12;
 
-export function PhonePreview({ image, dimmed, secondary, onMirror, mirrorDisabled, mirrorBusy }: PhonePreviewProps) {
+export function PhonePreview({ image, dimmed, secondary, onMirror, mirrorDisabled, mirrorBusy, mirrorLabel }: PhonePreviewProps) {
   const [time, setTime] = useState(clock);
 
   useEffect(() => {
@@ -47,7 +48,7 @@ export function PhonePreview({ image, dimmed, secondary, onMirror, mirrorDisable
               </button>
             )}
             <button type="button" className="button button--primary" title="Mirror (⌘↩)" style={{ width: "100%", height: 40, borderRadius: BUTTON_RADIUS }} onClick={() => !mirrorBusy && onMirror()} disabled={mirrorDisabled}>
-              {mirrorBusy ? <span className="spinner" style={{ borderColor: "rgba(255,255,255,.3)", borderTopColor: "#fff" }} /> : <><Icon name="playOn" />Mirror</>}
+              {mirrorBusy ? <span className="spinner" style={{ borderColor: "rgba(255,255,255,.3)", borderTopColor: "#fff" }} /> : mirrorLabel ?? <><Icon name="playOn" />Mirror</>}
             </button>
           </div>
         </div>

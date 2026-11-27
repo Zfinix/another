@@ -1,9 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the main window and the phone mirror windows",
   "windows": [
-    "main"
+    "main",
+    "mirror-*"
   ],
   "permissions": [
     "core:default",
@@ -14,6 +15,11 @@
     "core:window:allow-start-resize-dragging",
     "core:window:allow-set-always-on-top",
     "core:window:allow-set-theme",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-unminimize",
     "opener:default",
     "dialog:default",
     "updater:default",

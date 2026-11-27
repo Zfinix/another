@@ -75,7 +75,7 @@ export interface Profile {
 export type RemoteCommand =
   | { action: "apply"; profile: Profile; connect?: string }
   | { action: "connect"; serial: string }
-  | { action: "disconnect" }
+  | { action: "disconnect"; serial?: string }
   | { action: "measure" };
 
 export interface DevSettings {

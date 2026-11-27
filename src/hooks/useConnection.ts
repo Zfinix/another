@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { Device, Settings, FrameEvent, Screen, MacroEvent, PerfStats, EncoderTuning, DevSettings, ShowToast } from "../types";
 
 const FRAME_PAD = 8;
@@ -9,9 +9,7 @@ const TITLE_H = 36;
 const RAIL_W = 32;
 export const CHROME_W = FRAME_PAD * 3 + RAIL_W;
 export const CHROME_H = FRAME_PAD * 3 + TITLE_H;
-export const MAIN_WINDOW = { width: 1120, height: 760 };
-const MAIN_MIN = new LogicalSize(720, 520);
-const MIRROR_MIN = new LogicalSize(280 + CHROME_W, 240 + CHROME_H);
+export const MIRROR_MIN = new LogicalSize(280 + CHROME_W, 240 + CHROME_H);
 const MAX_VIEW = 860;
 const PERF_INTERVAL_MS = 1000;
 const VIDEO_KIND_CONFIG = 0;
@@ -57,7 +55,7 @@ const epochNow = () => performance.timeOrigin + performance.now();
 
 const SAME_ASPECT_TOLERANCE = 0.02;
 
-function windowSizeFor(width: number, height: number) {
+export function windowSizeFor(width: number, height: number) {
   const aspect = width / height;
   const viewW = aspect > 1 ? MAX_VIEW : Math.round(MAX_VIEW * aspect);
   const viewH = aspect > 1 ? Math.round(MAX_VIEW / aspect) : MAX_VIEW;
@@ -85,6 +83,12 @@ interface UseConnectionOptions {
   onNativeStats?: (fps: number, lagMinMs: number) => void;
   onCodecFallback?: (codec: string) => void;
   onRecordEvent?: (event: MacroEvent) => void;
+  /** The phone went away without the user stopping; the reason says why. */
+  onDropped?: (reason: string) => void;
+  /** The Disconnect menu item, which closes the mirror window. */
+  onDisconnectRequested?: () => void;
+  /** Window size for a phone screen of this size, when the first frame arrives. */
+  initialSize?: (width: number, height: number) => LogicalSize;
   perfOverlay?: boolean;
   directAdb?: boolean;
   lowLatency?: boolean;
@@ -121,8 +125,7 @@ export function useConnection(opts: UseConnectionOptions) {
   const [streamReady, setStreamReady] = useState(false);
   const [streamConfigured, setStreamConfigured] = useState(false);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
-  const [dropped, setDropped] = useState<{ device: Device; reason: string } | null>(null);
-  const mainSize = useRef<LogicalSize | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
   const streamReadyRef = useRef(false);
   const perfCounters = useRef<PerfCounters>(emptyCounters());
   const decodeStarts = useRef(new Map<number, number>());
@@ -206,21 +209,6 @@ export function useConnection(opts: UseConnectionOptions) {
     }
   }, []);
 
-  const restoreMainSize = async () => {
-    const size = mainSize.current ?? new LogicalSize(MAIN_WINDOW.width, MAIN_WINDOW.height);
-    mainSize.current = null;
-    setNativeActive(false);
-    try {
-      isProgrammaticResize.current = true;
-      const win = getCurrentWindow();
-      await win.setMinSize(MAIN_MIN);
-      await win.setSize(new LogicalSize(Math.max(size.width, MAIN_MIN.width), Math.max(size.height, MAIN_MIN.height)));
-    } catch {
-    } finally {
-      isProgrammaticResize.current = false;
-    }
-  };
-
   const connectToDevice = useCallback(async (device: Device, s: Settings, silent = false, dev?: DevSettings) => {
     if (dev) {
       directAdbRef.current = dev.directAdb;
@@ -238,14 +226,7 @@ export function useConnection(opts: UseConnectionOptions) {
       setStreamReady(false);
     }
     setConnectingSerial(device.serial);
-    setDropped(null);
-    if (!silent && !mainSize.current) {
-      try {
-        const win = getCurrentWindow();
-        mainSize.current = (await win.innerSize()).toLogical(await win.scaleFactor());
-        await win.setMinSize(MIRROR_MIN);
-      } catch { }
-    }
+    setFailure(null);
     if (!keepLastFrame) {
       setStreamConfigured(false);
       setLatencyMs(null);
@@ -443,8 +424,8 @@ export function useConnection(opts: UseConnectionOptions) {
           if (!isReconnecting.current) {
             setConnectedDevice(null);
             setScreen("welcome");
-            setDropped({ device, reason: msg.data.reason });
-            restoreMainSize();
+            setNativeActive(false);
+            opts.onDropped?.(msg.data.reason);
           }
         }
       };
@@ -501,11 +482,13 @@ export function useConnection(opts: UseConnectionOptions) {
       setConnectedDevice(device);
       setScreen("another");
 
-      isProgrammaticResize.current = true;
-      await getCurrentWindow().setSize(windowSizeFor(width, height));
-      isProgrammaticResize.current = false;
+      if (!silent) {
+        isProgrammaticResize.current = true;
+        await getCurrentWindow().setSize((opts.initialSize ?? windowSizeFor)(width, height));
+        isProgrammaticResize.current = false;
+      }
     } catch (e) {
-      if (!silent) showToast(`Could not mirror ${device.model.replace(/_/g, " ")}`, "error", { detail: `${e}` });
+      if (!silent) setFailure(`${e}`);
       else if (gen === connectionGen.current) {
         streamReadyRef.current = false;
         setStreamReady(false);
@@ -528,7 +511,7 @@ export function useConnection(opts: UseConnectionOptions) {
     try { await invoke("disconnect_device"); } catch { }
     setConnectedDevice(null);
     setScreen("welcome");
-    await restoreMainSize();
+    setNativeActive(false);
   }, [cleanupDecoder, closeVideoSocket]);
 
   const scheduleReconnect = useCallback((s: Settings) => {
@@ -703,10 +686,11 @@ export function useConnection(opts: UseConnectionOptions) {
   }, [screen]);
 
   useEffect(() => {
-    const unlisten = listen<string>("menu-event", (event) => {
+    const unlisten = getCurrentWebviewWindow().listen<string>("menu-event", (event) => {
       const id = event.payload;
       if (id === "disconnect") {
-        disconnect();
+        if (opts.onDisconnectRequested) opts.onDisconnectRequested();
+        else disconnect();
       } else if (id === "toggle_theme") {
         opts.setThemePref((p) => p === "dark" ? "light" : p === "light" ? "dark" : "light");
       } else if (id === "settings") {
@@ -767,8 +751,7 @@ export function useConnection(opts: UseConnectionOptions) {
     streamReady,
     streamConfigured,
     latencyMs,
-    dropped,
-    clearDropped: () => setDropped(null),
+    failure,
     perfStats,
     nativeActive,
     canvasRef,

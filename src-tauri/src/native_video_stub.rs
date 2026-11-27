@@ -19,12 +19,14 @@ impl NativeVideo {
     }
 }
 
-pub fn set_frame(_x: f64, _y: f64, _width: f64, _height: f64) {}
+pub fn set_frame(_label: &str, _x: f64, _y: f64, _width: f64, _height: f64) {}
 
-pub fn detach() {}
+pub fn detach(_label: &str) {}
 
-pub fn arm_probe(_x: f64, _y: f64) -> Result<std::sync::mpsc::Receiver<std::time::Instant>> {
+pub fn forget(_label: &str) {}
+
+pub fn arm_probe(_label: &str, _x: f64, _y: f64) -> Result<std::sync::mpsc::Receiver<std::time::Instant>> {
     Err(anyhow!("Native video is only available on macOS"))
 }
 
-pub fn disarm_probe() {}
+pub fn disarm_probe(_label: &str) {}

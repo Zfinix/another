@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use state::AppState;
 use std::sync::Arc;
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
-use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, RunEvent, WindowEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 /// `--profile <file>` applies a saved profile at launch and `--connect <serial>` connects to a device.
@@ -154,7 +154,40 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            let _ = app.emit("menu-event", event.id().0.as_str());
+            // Only the focused window acts, so Home reaches one phone rather than every mirror.
+            let label = app
+                .webview_windows()
+                .into_values()
+                .find(|window| window.is_focused().unwrap_or(false))
+                .map_or_else(|| "main".to_string(), |window| window.label().to_string());
+            let _ = app.emit_to(EventTarget::webview_window(label), "menu-event", event.id().0.as_str());
+        })
+        .on_window_event(|window, event| {
+            let label = window.label().to_string();
+            if !label.starts_with(commands::MIRROR_LABEL_PREFIX) {
+                return;
+            }
+            let app = window.app_handle().clone();
+            match event {
+                WindowEvent::Focused(true) => {
+                    tauri::async_runtime::spawn(async move {
+                        let state = app.state::<AppState>();
+                        let sessions = state.sessions.lock().await;
+                        let mut focus = state.audio_focus.lock().await;
+                        *focus = Some(label);
+                        state::apply_audio_focus(&sessions, focus.as_deref());
+                    });
+                }
+                WindowEvent::Destroyed => {
+                    native_video::forget(&label);
+                    tauri::async_runtime::spawn(async move {
+                        let state = app.state::<AppState>();
+                        commands::end_session(&state, &label).await;
+                        let _ = app.emit("mirror-closed", label);
+                    });
+                }
+                _ => {}
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_devices,
@@ -212,18 +245,21 @@ pub fn run() {
             commands::set_window_blur,
             commands::device_info,
             commands::device_facts,
+            commands::open_mirror,
+            commands::close_mirror,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
             if let RunEvent::ExitRequested { .. } = &event {
                 let state = app.state::<AppState>();
-                let session = state.session.clone();
+                let sessions = state.sessions.clone();
                 let mcp = state.mcp.clone();
                 tauri::async_runtime::block_on(async {
-                    if let Some(s) = session.lock().await.take() {
-                        s.shutdown.notify_one();
-                        another_core::scrcpy::stop_server(&s.device_serial, 27183).await;
+                    let ended: Vec<_> = sessions.lock().await.drain().map(|(_, session)| session).collect();
+                    for session in ended {
+                        session.shutdown.notify_one();
+                        another_core::scrcpy::stop_server(&session.device_serial, session.port.port).await;
                     }
                     if let Some(ct) = mcp.lock().await.cancel.take() {
                         ct.cancel();

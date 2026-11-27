@@ -1,6 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { MacroEvent, MacroTimedEvent, SavedMacro, ShowToast } from "../types";
+import { announce, onAnnounced, onStored, store } from "@/lib/sync";
+
+const MACROS_TOPIC = "macros";
 
 export interface MacroInfo {
   name: string;
@@ -43,17 +46,26 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
         try {
           const defaultDir = await invoke<string>("get_default_macros_dir");
           setMacrosDirState(defaultDir);
-          localStorage.setItem("macros_dir", defaultDir);
+          store("macros_dir", defaultDir);
           refreshMacros(defaultDir);
         } catch {}
       }
     })();
   }, []);
 
+  const refreshRef = useRef(refreshMacros);
+  refreshRef.current = refreshMacros;
+  useEffect(() => onAnnounced(MACROS_TOPIC, () => refreshRef.current()), []);
+  useEffect(() => onStored("macros_dir", (dir) => {
+    if (!dir) return;
+    setMacrosDirState(dir);
+    refreshRef.current(dir);
+  }), []);
+
   const setMacrosDir = useCallback(
     (dir: string) => {
       setMacrosDirState(dir);
-      localStorage.setItem("macros_dir", dir);
+      store("macros_dir", dir);
       refreshMacros(dir);
     },
     [refreshMacros],
@@ -81,6 +93,7 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
         await invoke("save_macro_file", { dir: macrosDir, macroData: macro });
         showToast(`Saved ${macroName}`, "success", { detail: `${macro.events.length} events` });
         refreshMacros();
+        announce(MACROS_TOPIC);
         onRecordingStopped?.();
       } catch (e) {
         showToast("Could not save the macro", "error", { detail: `${e}` });
@@ -131,6 +144,7 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
         await invoke("delete_macro_file", { dir: macrosDir, name });
         showToast(`Deleted ${name}`, "success");
         refreshMacros();
+        announce(MACROS_TOPIC);
       } catch (e) {
         showToast("Could not delete the macro", "error", { detail: `${e}` });
       }
@@ -147,6 +161,7 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
           newName,
         });
         refreshMacros();
+        announce(MACROS_TOPIC);
       } catch (e) {
         showToast("Could not rename the macro", "error", { detail: `${e}` });
       }
@@ -159,6 +174,7 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
       try {
         await invoke("save_macros_order", { dir: macrosDir, order });
         refreshMacros();
+        announce(MACROS_TOPIC);
       } catch {}
     },
     [macrosDir, refreshMacros],
@@ -244,6 +260,7 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
         }
         showToast(`Imported ${valid.length} ${valid.length === 1 ? "macro" : "macros"}`, "success");
         refreshMacros();
+        announce(MACROS_TOPIC);
       } catch {
         showToast("Could not read that file", "error", { detail: "Pick a file exported from Another" });
       }

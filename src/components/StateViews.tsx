@@ -97,3 +97,16 @@ export function DisconnectedState({ name, brand, reason, onBack, onReconnect }: 
     </Panel>
   );
 }
+
+export function FailedState({ name, brand, reason, onClose, onRetry }: { name: string; brand: string; reason: string; onClose: () => void; onRetry: () => void }) {
+  return (
+    <Panel>
+      <DeviceTile maker={brand} size="lg" off />
+      <Heading title={`Could not mirror ${name}`} meta={reason} />
+      <div className="flex gap-2">
+        <button type="button" className="button button--secondary" onClick={onClose}>Close</button>
+        <button type="button" className="button button--primary" onClick={onRetry}>Try again</button>
+      </div>
+    </Panel>
+  );
+}

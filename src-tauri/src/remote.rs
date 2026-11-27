@@ -186,7 +186,13 @@ pub fn normalize_command(body: Value) -> Result<Value> {
                 .ok_or_else(|| anyhow!("'connect' needs a 'serial'"))?;
             Ok(json!({ "action": "connect", "serial": serial }))
         }
-        "disconnect" => Ok(json!({ "action": "disconnect" })),
+        "disconnect" => {
+            let mut command = json!({ "action": "disconnect" });
+            if let Some(serial) = body.get("serial").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                command["serial"] = json!(serial);
+            }
+            Ok(command)
+        }
         other => Err(anyhow!("Unknown action '{}'", other)),
     }
 }

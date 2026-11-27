@@ -22,7 +22,9 @@ export interface DeviceViewProps {
   awake: { checked: boolean; onChange: (on: boolean) => void };
   secondary: { label: string; run: () => void; busy?: boolean } | null;
   onMirror: () => void;
-  mirrorBusy: boolean;
+  mirrorBusy?: boolean;
+  /** Replaces "Mirror" on the button, such as "Show window" while the phone is mirroring. */
+  mirrorLabel?: string;
 }
 
 function IconCell({ icon, tone, label, children }: { icon: IconName; tone: string; label: string; children: React.ReactNode }) {
@@ -38,7 +40,7 @@ function IconCell({ icon, tone, label, children }: { icon: IconName; tone: strin
 }
 
 export function DeviceView(props: DeviceViewProps) {
-  const { title, brand, online, status, detail, preview, facts, connection, latency, stream, profile, audio, awake, secondary, onMirror, mirrorBusy } = props;
+  const { title, brand, online, status, detail, preview, facts, connection, latency, stream, profile, audio, awake, secondary, onMirror, mirrorBusy, mirrorLabel } = props;
   const statusColor = online ? "var(--live)" : "var(--muted)";
 
   return (
@@ -56,7 +58,7 @@ export function DeviceView(props: DeviceViewProps) {
       </header>
 
       <div className="flex flex-wrap gap-8 items-start">
-        <PhonePreview image={preview} dimmed={!online} secondary={secondary} onMirror={onMirror} mirrorDisabled={!online} mirrorBusy={mirrorBusy} />
+        <PhonePreview image={preview} dimmed={!online} secondary={secondary} onMirror={onMirror} mirrorDisabled={!online} mirrorBusy={mirrorBusy} mirrorLabel={mirrorLabel} />
 
         <div className="flex-[1_1_280px] max-w-[360px] min-w-0 flex flex-col gap-6">
           {facts && facts.length > 0 && (
