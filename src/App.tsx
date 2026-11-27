@@ -903,6 +903,8 @@ function App() {
         version={version}
         onCheckForUpdates={() => updater.checkForUpdates()}
         onWhatsNew={() => { setShowSettings(false); setShowNews(true); }}
+        onConnectPhone={() => { setShowSettings(false); setShowConnect(true); }}
+        onOpenAgents={() => { setShowSettings(false); setView({ kind: "agents" }); }}
       />
       <ConnectDialog
         open={showConnect}

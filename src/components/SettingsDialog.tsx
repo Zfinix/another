@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AppDialog, DialogTitle } from "@/components/ui/dialog";
 import { Icon } from "@/components/Icon";
 import { Switch } from "@/components/ui/switch";
@@ -11,10 +12,12 @@ import type { Settings, DevSettings, EncoderTuning, ThemePreference } from "../t
 import type { LatencyResult } from "../hooks/useLatencyProbe";
 import { RESOLUTION_OPTIONS, CODEC_OPTIONS, ENCODER_TUNING_OPTIONS } from "../types";
 
+const ISSUES_URL = "https://github.com/Zfinix/another/issues/new";
+
 const FPS_OPTIONS = [30, 60, 90, 120].map((v) => ({ value: v, label: `${v} fps` }));
 const MBPS = 1_000_000;
 
-export type SettingsPane = "general" | "stream" | "network" | "audio" | "shortcuts" | "profiles" | "developer";
+export type SettingsPane = "general" | "stream" | "network" | "audio" | "shortcuts" | "profiles" | "developer" | "help";
 
 const PANES: { id: SettingsPane; name: string; icon: IconName; tone: string }[] = [
   { id: "general", name: "General", icon: "settingsOn", tone: "g-grey" },
@@ -24,6 +27,7 @@ const PANES: { id: SettingsPane; name: string; icon: IconName; tone: string }[] 
   { id: "shortcuts", name: "Shortcuts", icon: "paneShortcutsOn", tone: "g-grey" },
   { id: "profiles", name: "Profiles", icon: "paneProfilesOn", tone: "g-orange" },
   { id: "developer", name: "Developer", icon: "paneDeveloperOn", tone: "g-ink" },
+  { id: "help", name: "Help", icon: "paneHelpOn", tone: "g-teal" },
 ];
 
 const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
@@ -73,6 +77,8 @@ interface SettingsDialogProps {
   version: string | null;
   onCheckForUpdates: () => void;
   onWhatsNew: () => void;
+  onConnectPhone: () => void;
+  onOpenAgents: () => void;
 }
 
 function Section({ label, children }: { label: string; children: React.ReactNode }) {
@@ -162,7 +168,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
             </Section>
             <Section label="About">
               <ValueRow label={`Another ${props.version ? `v${props.version}` : ""}`} value="Check for updates" accent onClick={props.onCheckForUpdates} />
-              <ValueRow label="What's new in this version" value="Show" accent onClick={props.onWhatsNew} />
             </Section>
           </>
         )}
@@ -249,6 +254,24 @@ export function SettingsDialog(props: SettingsDialogProps) {
               ) : (
                 <ValueRow label="Touch to screen latency" value="Mirror a phone first" />
               )}
+            </Section>
+          </>
+        )}
+        {pane === "help" && (
+          <>
+            <Section label="Get started">
+              <ValueRow label="Pair over Wi-Fi with a QR code" value="Pair a phone" accent onClick={props.onConnectPhone} />
+              <ValueRow label="Connect over USB" value="Turn on USB debugging" />
+              <ValueRow label="Let an AI agent use the phone" value="Connect an agent" accent onClick={props.onOpenAgents} />
+            </Section>
+            <Section label="If something goes wrong">
+              <ValueRow label="The phone is not listed" value="Replug it and tap Allow" />
+              <ValueRow label="Pairing does not finish" value="Use the same Wi-Fi on both" />
+              <ValueRow label="The video stutters" value="Turn on adaptive quality" accent onClick={() => onPaneChange("stream")} />
+            </Section>
+            <Section label="More">
+              <ValueRow label="What's new in this version" value="Show" accent onClick={props.onWhatsNew} />
+              <ValueRow label="Report a problem" value="Open GitHub" accent onClick={() => { openUrl(ISSUES_URL).catch(() => { }); }} />
             </Section>
           </>
         )}
