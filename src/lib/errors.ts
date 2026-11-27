@@ -15,19 +15,19 @@ const INSTALL_FAILURES: Record<string, string> = {
 const KNOWN: [RegExp, string][] = [
   [/unauthorized/i, "Allow USB debugging on the phone, then try again"],
   [/device offline|device still connecting/i, "The phone is offline. Reconnect it and try again"],
-  [/device '.*' not found|device not found|no devices\/emulators|not connected/i, "The phone is no longer connected"],
+  [/device '.*' not found|device not found|no devices\/emulators/i, "The phone is no longer connected"],
   [/more than one (device|emulator)/i, "More than one phone is connected. Pick one from the list"],
   [/failed to (run|spawn) adb/i, "Could not start adb. Reinstall Another and try again"],
   [/wrong password|pairing code|unable to start pairing|failed to pair/i, "Pairing failed. Check the code, it expires quickly"],
-  [/connection refused|actively refused|econnrefused/i, "The phone refused the connection. Check that Wi-Fi debugging is on"],
-  [/no route to host|network is unreachable|host is down|host unreachable/i, "Cannot reach the phone. Check it is on the same network"],
-  [/timed out|timeout/i, "The phone took too long to answer. Try again"],
-  [/connection reset|broken pipe|unexpected eof|early eof|failed to fill whole buffer|connection closed|protocol fault|closed by remote/i, "Lost the connection to the phone"],
+  [/connection refused|actively refused|econnrefused/i, "The connection was refused"],
+  [/no route to host|network is unreachable|host is down|host unreachable/i, "That address cannot be reached. Check the network"],
+  [/timed out|timeout/i, "It took too long to answer. Try again"],
+  [/connection reset|broken pipe|unexpected eof|early eof|failed to fill whole buffer|connection closed|protocol fault|closed by remote|(^|: )closed$/i, "The connection dropped"],
   [/address already in use|address in use/i, "That port is already in use"],
+  [/tailscale is not installed/i, "Tailscale is not installed"],
   [/no space left/i, "Not enough storage"],
   [/no such file or directory|cannot find the (file|path)/i, "That file or folder no longer exists"],
   [/play the phone audio|output stream|audio output/i, "Could not play the phone's audio on this computer"],
-  [/tailscale is not installed/i, "Tailscale is not installed"],
   [/permission denied|operation not permitted|access is denied/i, "Another does not have permission to do that"],
 ];
 
@@ -61,7 +61,7 @@ export function cleanError(error: unknown): string {
     .pop() ?? "";
   const cleaned = cause
     .replace(/\s*\(os error \d+\)/gi, "")
-    .replace(/^(adb|error|failed|fatal)\b:?\s*/i, "");
+    .replace(/^(adb|error|fatal)\s*:\s*/i, "");
   if (!cleaned || NOISE.test(cleaned) || NOISE.test(firstLine)) return FALLBACK;
   return sentence(cleaned);
 }
