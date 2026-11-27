@@ -342,8 +342,10 @@ pub async fn notifications(serial: &str) -> Result<Vec<crate::notifications::Pho
 
 const ICON_SERVER_REMOTE_PATH: &str = "/data/local/tmp/another-icons.jar";
 const ICON_SERVER_MAIN: &str = "dev.another.server.AppIcons";
+static ICON_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn is_package_name(name: &str) -> bool {
+/// Android package names only use letters, digits, dots and underscores.
+pub fn is_package_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
 }
 
@@ -353,6 +355,8 @@ pub async fn app_icons(serial: &str, packages: &[String]) -> Result<HashMap<Stri
     if packages.is_empty() {
         return Ok(HashMap::new());
     }
+    // Every call pushes the server to the same path, so one push must not overwrite another's jar.
+    let _one_at_a_time = ICON_LOCK.lock().await;
     let server = RESOURCE_DIR
         .get()
         .map(|dir| dir.join("resources").join(crate::scrcpy::ANOTHER_SERVER_FILE))

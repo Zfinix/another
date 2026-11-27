@@ -63,12 +63,28 @@ function readIcons(): Record<string, string> {
   }
 }
 
-async function notifyMac(serial: string, n: PhoneNotification, deviceName: string, cached?: string) {
-  let icon = cached?.split(",")[1] ?? null;
-  if (!icon) {
-    const found = await invoke<Record<string, string>>("app_icons", { serial, packages: [n.package] }).catch(() => ({} as Record<string, string>));
-    icon = found[n.package] ?? null;
+const MAX_ICON_ATTEMPTS = 3;
+const pendingIcons = new Map<string, Promise<string | null>>();
+const iconAttempts = new Map<string, number>();
+
+const canFetchIcon = (pkg: string) => !pendingIcons.has(pkg) && (iconAttempts.get(pkg) ?? 0) < MAX_ICON_ATTEMPTS;
+
+/** Each app's launcher icon as base64 PNG, or null. Requests already in flight are shared, and a failed one is retried a few times. */
+function fetchIcons(serial: string, packages: string[]): Promise<Record<string, string | null>> {
+  const wanted = packages.filter(canFetchIcon);
+  if (wanted.length > 0) {
+    wanted.forEach((pkg) => iconAttempts.set(pkg, (iconAttempts.get(pkg) ?? 0) + 1));
+    const batch = invoke<Record<string, string>>("app_icons", { serial, packages: wanted }).catch(() => ({} as Record<string, string>));
+    for (const pkg of wanted) {
+      pendingIcons.set(pkg, batch.then((found) => found[pkg] ?? null).finally(() => pendingIcons.delete(pkg)));
+    }
   }
+  return Promise.all(packages.map((pkg) => (pendingIcons.get(pkg) ?? Promise.resolve(null)).then((icon) => [pkg, icon] as const)))
+    .then((entries) => Object.fromEntries(entries));
+}
+
+async function notifyMac(serial: string, n: PhoneNotification, deviceName: string, cached?: string) {
+  const icon = cached?.split(",")[1] ?? (await fetchIcons(serial, [n.package]))[n.package] ?? null;
   await invoke("notify_phone", { title: n.title, subtitle: `${appName(n.package)} · ${deviceName}`, body: n.text, package: n.package, icon }).catch(() => { });
 }
 
@@ -92,7 +108,6 @@ export function useNotifications({ serial, deviceName, mirroring }: Options) {
   const [systemCenter, setSystemCenterState] = useState(() => readFlag("notify_system", true));
   const [offerCodes, setOfferCodesState] = useState(() => readFlag("notify_codes", true));
   const [icons, setIcons] = useState<Record<string, string>>(readIcons);
-  const asked = useRef<Set<string>>(new Set());
   const iconsRef = useRef(icons);
   iconsRef.current = icons;
   const seen = useRef<Map<string, string> | null>(null);
@@ -155,15 +170,15 @@ export function useNotifications({ serial, deviceName, mirroring }: Options) {
 
   useEffect(() => {
     if (!serial) return;
-    const missing = [...new Set(items.map((n) => n.package))].filter((pkg) => !icons[pkg] && !asked.current.has(pkg));
+    const missing = [...new Set(items.map((n) => n.package))].filter((pkg) => !icons[pkg] && canFetchIcon(pkg));
     if (missing.length === 0) return;
-    missing.forEach((pkg) => asked.current.add(pkg));
-    invoke<Record<string, string>>("app_icons", { serial, packages: missing })
+    fetchIcons(serial, missing)
       .then((found) => {
-        if (Object.keys(found).length === 0) return;
+        const fetched = Object.entries(found).filter((entry): entry is [string, string] => entry[1] !== null);
+        if (fetched.length === 0) return;
         setIcons((prev) => {
           const next = { ...prev };
-          for (const [pkg, png] of Object.entries(found)) next[pkg] = `data:image/png;base64,${png}`;
+          for (const [pkg, png] of fetched) next[pkg] = `data:image/png;base64,${png}`;
           try {
             localStorage.setItem(ICONS_KEY, JSON.stringify(next));
           } catch { }

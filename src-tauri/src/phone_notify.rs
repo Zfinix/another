@@ -50,12 +50,15 @@ pub fn show(app: &AppHandle, title: &str, subtitle: &str, body: &str, package: &
     notification.send().map(|_| ()).map_err(|e| anyhow!("{e}"))
 }
 
+/// Writes the icon where the notification can point at it. It is rewritten every time so an app
+/// that changes its icon shows the new one.
 fn cached_icon(app: &AppHandle, package: &str, png: &str) -> Result<PathBuf> {
-    let dir = app.path().app_cache_dir()?.join("app-icons");
-    let path = dir.join(format!("{package}.png"));
-    if !path.exists() {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(&path, base64::engine::general_purpose::STANDARD.decode(png)?)?;
+    if !another_core::adb::is_package_name(package) {
+        return Err(anyhow!("'{}' is not an Android package name", package));
     }
+    let dir = app.path().app_cache_dir()?.join("app-icons");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{package}.png"));
+    std::fs::write(&path, base64::engine::general_purpose::STANDARD.decode(png)?)?;
     Ok(path)
 }
