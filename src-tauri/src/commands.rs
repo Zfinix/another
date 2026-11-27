@@ -1235,8 +1235,7 @@ pub async fn cli_status() -> Option<String> {
     (link.exists() && link_is_ours(&link)).then(|| link.to_string_lossy().into_owned())
 }
 
-/// Links the bundled CLI onto the PATH as `another`. On macOS that is /usr/local/bin, asking for
-/// an administrator password only when the folder is not writable. Elsewhere it is ~/.local/bin.
+/// Where `install_cli` put the `another` command, and whether that folder is on the PATH.
 #[derive(Serialize)]
 pub struct CliInstall {
     pub path: String,
@@ -1264,6 +1263,8 @@ fn stable_cli(source: PathBuf) -> Result<PathBuf, String> {
     Ok(copy)
 }
 
+/// Links the bundled CLI onto the PATH as `another`. On macOS that is /usr/local/bin, asking for
+/// an administrator password only when the folder is not writable. Elsewhere it is ~/.local/bin.
 #[cfg(unix)]
 #[tauri::command]
 pub async fn install_cli() -> Result<CliInstall, String> {
@@ -1352,12 +1353,13 @@ pub struct WindowBounds {
     height: f64,
 }
 
-/// Opens the phone's mirror window, or brings it forward when it is already open.
+/// Sends the calling window's stream to its webview while it records native video.
 #[tauri::command]
 pub fn set_record_feed(window: WebviewWindow, enabled: bool) {
     video::set_record_feed(window.label(), enabled);
 }
 
+/// Opens the phone's mirror window, or brings it forward when it is already open.
 #[tauri::command]
 pub async fn open_mirror(
     app: AppHandle,
