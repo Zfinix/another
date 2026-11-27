@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import {
   DevicePhoneMobileIcon,
   Cog6ToothIcon,
@@ -7,9 +8,9 @@ import {
   ChevronRightIcon,
   SunIcon,
   MoonIcon,
-  SignalIcon,
   ComputerDesktopIcon,
   WifiIcon,
+  GlobeAltIcon,
 } from "@heroicons/react/24/outline";
 import {
   Dialog,
@@ -19,8 +20,8 @@ import {
 } from "@/components/ui/dialog";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
-import type { Device, ThemePreference } from "../types";
+import { cn, isNetworkSerial } from "@/lib/utils";
+import type { Device, TailnetPeer, TailnetStatus, ThemePreference } from "../types";
 import { getDeviceDisplayName, getDeviceNickname, setDeviceNickname } from "../types";
 import appIcon from "../assets/icon.png";
 
@@ -35,12 +36,16 @@ interface WelcomeScreenProps {
   showToast: (msg: string, type?: "error" | "info") => void;
 }
 
-function truncateSerial(s: string) {
-  return s.length > 16 ? s.slice(0, 6) + "..." + s.slice(-4) : s;
+const TAILNET_POLL_MS = 15000;
+
+function tailnetPath(peer: TailnetPeer) {
+  if (!peer.online) return "Offline";
+  if (peer.direct) return "Tailnet · direct";
+  return peer.relay ? `Tailnet · relayed via ${peer.relay}` : "Tailnet · relayed";
 }
 
-function isWifiDevice(serial: string) {
-  return serial.includes(":");
+function truncateSerial(s: string) {
+  return s.length > 16 ? s.slice(0, 6) + "..." + s.slice(-4) : s;
 }
 
 export function WelcomeScreen({
@@ -61,6 +66,42 @@ export function WelcomeScreen({
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; device: Device } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  const [refreshSpin, setRefreshSpin] = useState(0);
+  const [version, setVersion] = useState<string | null>(null);
+  const [tailnet, setTailnet] = useState<TailnetStatus | null>(null);
+  const [tailnetConnecting, setTailnetConnecting] = useState<string | null>(null);
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => { });
+  }, []);
+
+  const refreshTailnet = () => {
+    invoke<TailnetStatus>("tailnet_status").then(setTailnet).catch(() => setTailnet(null));
+  };
+
+  useEffect(() => {
+    refreshTailnet();
+    const timer = setInterval(refreshTailnet, TAILNET_POLL_MS);
+    return () => clearInterval(timer);
+  }, []);
+
+  const tailnetPeers = tailnet?.running
+    ? tailnet.peers.filter((peer) => !devices.some((d) => d.serial === peer.address))
+    : [];
+
+  const handleTailnetConnect = async (peer: TailnetPeer) => {
+    if (!peer.online || connectingSerial || tailnetConnecting) return;
+    setTailnetConnecting(peer.address);
+    try {
+      await invoke("wifi_connect", { address: peer.address });
+      onRefreshDevices();
+      onConnectDevice({ serial: peer.address, model: peer.name, state: "device" });
+    } catch {
+      showToast(`Could not reach ${peer.name} over the tailnet. Connect it by USB once and turn on Wi-Fi debugging, then try again.`);
+    } finally {
+      setTailnetConnecting(null);
+    }
+  };
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -100,7 +141,7 @@ export function WelcomeScreen({
     e.stopPropagation();
     setTogglingSerial(device.serial);
     try {
-      if (isWifiDevice(device.serial)) {
+      if (isNetworkSerial(device.serial)) {
         await invoke("wifi_disconnect", { address: device.serial });
         showToast(`${getDeviceDisplayName(device)} WiFi disconnected`, "info");
       } else if (device.wifi_available) {
@@ -121,123 +162,213 @@ export function WelcomeScreen({
     }
   };
 
+  const menuItemClass = "flex w-full h-7 items-center justify-start px-2.5 text-[12.5px] font-normal text-foreground bg-transparent border-transparent rounded-md shadow-none hover:bg-surface-2 dark:hover:bg-surface-2";
+  const chromeBtnClass = "size-7 rounded-md text-text-2 hover:bg-transparent dark:hover:bg-transparent hover:text-foreground press [&_svg]:size-4";
+
+  const handleRefresh = () => {
+    setRefreshSpin((n) => n + 1);
+    onRefreshDevices();
+    refreshTailnet();
+  };
+
   return (
-    <div className="h-screen w-screen flex flex-col items-center justify-center bg-background relative animate-in fade-in duration-600 pt-[38px]">
-      <div className="absolute top-0 left-0 right-0 h-[38px] drag-region bg-surface border-b border-border flex items-center justify-end" data-tauri-drag-region>
-        <div className="flex items-center gap-0.5 pr-2.5 no-drag">
-          <Button variant="ghost" size="icon-xs" className="text-text-3 [&_svg]:size-[15px]" onClick={onCycleTheme} title={themePref === "light" ? "Light" : themePref === "dark" ? "Dark" : "System"}>
+    <div className="h-screen w-screen flex flex-col bg-background animate-in fade-in duration-300">
+      <header className="h-10 shrink-0 flex items-center justify-end pr-2 drag-region" data-tauri-drag-region>
+        <div className="flex items-center gap-0.5 no-drag">
+          <Button variant="ghost" size="icon-sm" className={chromeBtnClass} onClick={onCycleTheme} title={themePref === "light" ? "Theme: Light" : themePref === "dark" ? "Theme: Dark" : "Theme: System"}>
             {themePref === "light" ? <SunIcon /> : themePref === "dark" ? <MoonIcon /> : <ComputerDesktopIcon />}
           </Button>
-          <Button variant="ghost" size="icon-xs" className="text-text-3 [&_svg]:size-[15px]" onClick={() => setShowWifiDialog(true)} title="Connect via WiFi">
-            <WifiIcon />
-          </Button>
-          <Button variant="ghost" size="icon-xs" className="text-text-3 [&_svg]:size-[15px]" onClick={onOpenSettings} title="Settings">
+          <Button variant="ghost" size="icon-sm" className={chromeBtnClass} onClick={onOpenSettings} title="Settings">
             <Cog6ToothIcon />
           </Button>
         </div>
-      </div>
+      </header>
 
-      <div className="flex flex-col items-center gap-3 mb-2">
-        <img src={appIcon} alt="Another" className="size-16 rounded-2xl" />
-        <h1 className="text-[28px] font-bold tracking-tight">Another</h1>
-      </div>
-      <p className="text-sm text-text-2 mb-10">Android screen mirroring and control</p>
-
-      <div className="w-[360px] max-w-[90vw]">
-        <div className="flex items-center justify-between mb-1.5 px-2">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-text-3">
-            {devices.length > 0 ? `${devices.length} device${devices.length > 1 ? "s" : ""} found` : "Searching..."}
-          </span>
-          <Button variant="ghost" size="xs" className="text-text-3 text-[10px] gap-[3px] [&_svg]:size-2.5" onClick={onRefreshDevices}>
-            <ArrowPathIcon /> Refresh
-          </Button>
+      <main className="mx-2 mb-2 flex-1 min-h-0 flex flex-col rounded-[14px] bg-surface border border-border overflow-hidden">
+        <div className="px-5 pt-7 pb-6 animate-in fade-in slide-in-from-bottom-1 duration-500">
+          <img src={appIcon} alt="" className="size-11 rounded-[11px]" draggable={false} />
+          <h1 className="mt-4 text-[22px] leading-tight font-semibold tracking-[-0.02em]">Another</h1>
+          <p className="mt-1 text-[13px] leading-normal text-text-2">Mirror and control your Android from your desktop.</p>
         </div>
 
-        {devices.length === 0 ? (
-          <div className="text-center py-8 px-5 bg-surface border border-dashed border-border rounded-xl flex flex-col items-center">
-            <SignalIcon className="size-8 text-text-3 mb-3 opacity-50" />
-            <p className="text-xs text-text-3 leading-relaxed">No devices detected.<br />Connect your Android via USB and enable USB debugging.</p>
+        <section className="flex-1 min-h-0 flex flex-col">
+          <div className="flex items-center justify-between px-5 h-8 shrink-0">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-text-3">
+              {devices.length > 0 ? `Devices · ${devices.length}` : "Looking for devices"}
+            </span>
+            <Button variant="ghost" size="icon-xs" className="size-6 rounded-md text-text-3 hover:bg-transparent dark:hover:bg-transparent hover:text-foreground press [&_svg]:size-3.5" onClick={handleRefresh} title="Refresh">
+              <ArrowPathIcon key={refreshSpin} className={refreshSpin ? "motion-safe:animate-[spin_600ms_cubic-bezier(0.23,1,0.32,1)_1]" : ""} />
+            </Button>
           </div>
-        ) : (
-          devices.map((d) => (
-            <div
-              key={d.serial}
-              className="bg-transparent border-none rounded-lg py-2.5 px-2 mb-0.5 cursor-pointer transition-all duration-200 flex items-center gap-2.5 hover:opacity-60"
-              onClick={() => !connectingSerial && onConnectDevice(d)}
-              onContextMenu={(e) => handleContextMenu(e, d)}
-            >
-              <div className="size-[30px] rounded-[7px] bg-surface-2 flex items-center justify-center text-text-2 shrink-0 [&_svg]:size-[15px]">
-                <DevicePhoneMobileIcon />
-              </div>
-              <div className="flex-1 min-w-0">
-                {editingSerial === d.serial ? (
-                  <input
-                    className="text-[13px] font-semibold leading-tight bg-surface-2 border border-brand rounded w-full text-foreground py-px px-1 outline-none"
-                    value={editValue}
-                    onChange={(e) => setEditValue(e.target.value)}
-                    onBlur={() => { setDeviceNickname(d.serial, editValue); setEditingSerial(null); }}
-                    onKeyDown={(e) => {
-                      e.stopPropagation();
-                      if (e.key === "Enter") { setDeviceNickname(d.serial, editValue); setEditingSerial(null); }
-                      if (e.key === "Escape") setEditingSerial(null);
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                    autoFocus
-                  />
-                ) : (
+          <div className={cn("relative h-px mx-5 shrink-0 bg-border overflow-hidden", devices.length === 0 && "scan-bar")} />
+
+          {devices.length === 0 ? (
+            <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 py-5 animate-in fade-in duration-300">
+              <p className="text-[13px] font-medium">No phone connected</p>
+              <ol className="mt-3 flex flex-col gap-2.5">
+                {[
+                  "Plug your phone in with a USB cable.",
+                  "Turn on USB debugging in Developer options.",
+                  "Tap Allow when your phone asks to trust this computer.",
+                ].map((step, i) => (
+                  <li key={step} className="flex gap-2.5 text-[12px] leading-[1.5] text-text-2">
+                    <span className="mt-px size-[18px] shrink-0 rounded-full border border-border flex items-center justify-center font-mono text-[10px] text-text-3">{i + 1}</span>
+                    <span className="min-w-0">{step}</span>
+                  </li>
+                ))}
+              </ol>
+              <Button variant="outline" size="sm" className="mt-5 h-8 rounded-lg px-3 text-[12.5px] gap-1.5 border-input press [&_svg]:size-3.5" onClick={() => setShowWifiDialog(true)}>
+                <WifiIcon /> Connect by IP
+              </Button>
+            </div>
+          ) : (
+            <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar px-2 py-1.5">
+              {devices.map((d, i) => {
+                const isConnecting = connectingSerial === d.serial;
+                const wifiOn = isNetworkSerial(d.serial) || !!d.wifi_available;
+                return (
                   <div
-                    className="text-[13px] font-semibold leading-tight truncate cursor-default"
-                    onDoubleClick={(e) => { e.stopPropagation(); setEditingSerial(d.serial); setEditValue(getDeviceDisplayName(d)); }}
-                    title="Double-click to rename"
+                    key={d.serial}
+                    role="button"
+                    tabIndex={0}
+                    style={{ animationDelay: `${i * 40}ms` }}
+                    className={cn(
+                      "group h-[52px] px-3 rounded-[10px] flex items-center gap-3 cursor-default outline-none press animate-in fade-in slide-in-from-bottom-1 duration-300 fill-mode-both",
+                      "focus-visible:bg-surface-2",
+                      isConnecting ? "bg-surface-2" : !connectingSerial && "hover-dim",
+                      connectingSerial && !isConnecting && "opacity-50",
+                    )}
+                    onClick={() => !connectingSerial && onConnectDevice(d)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !connectingSerial) onConnectDevice(d); }}
+                    onContextMenu={(e) => handleContextMenu(e, d)}
                   >
-                    {getDeviceDisplayName(d)}
-                  </div>
-                )}
-                <div className="text-[10px] font-mono text-text-3 leading-tight truncate">
-                  {truncateSerial(d.serial)}
-                </div>
-              </div>
-              <div className="flex items-center gap-0.5 shrink-0">
-                {connectingSerial === d.serial ? (
-                  <div className="size-4 border-2 border-border border-t-brand rounded-full animate-spin" />
-                ) : (
-                  <>
-                    <Button
-                      variant="ghost"
-                      className={cn(
-                        "flex items-center justify-center size-7 border-transparent bg-transparent text-text-3 rounded-md opacity-40 transition-all duration-150 [&_svg]:size-[15px] shadow-none",
-                        (isWifiDevice(d.serial) || d.wifi_available) && "opacity-100 text-brand drop-shadow-[0_0_4px_var(--brand-glow-strong)]",
-                        "hover:opacity-100 hover:bg-surface-2",
-                        "disabled:opacity-30 disabled:cursor-not-allowed"
+                    <div className="size-8 rounded-lg bg-surface-2 border border-border flex items-center justify-center text-text-2 shrink-0 [&_svg]:size-4">
+                      <DevicePhoneMobileIcon />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      {editingSerial === d.serial ? (
+                        <input
+                          className="text-[13px] font-medium leading-tight bg-surface-2 border border-input focus:border-brand rounded-md w-full text-foreground py-0.5 px-1.5 outline-none"
+                          value={editValue}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          onBlur={() => { setDeviceNickname(d.serial, editValue); setEditingSerial(null); }}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === "Enter") { setDeviceNickname(d.serial, editValue); setEditingSerial(null); }
+                            if (e.key === "Escape") setEditingSerial(null);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          autoFocus
+                        />
+                      ) : (
+                        <div
+                          className="text-[13px] font-medium leading-tight truncate"
+                          onDoubleClick={(e) => { e.stopPropagation(); setEditingSerial(d.serial); setEditValue(getDeviceDisplayName(d)); }}
+                          title="Double-click to rename"
+                        >
+                          {getDeviceDisplayName(d)}
+                        </div>
                       )}
-                      title={isWifiDevice(d.serial) ? "Disable WiFi" : "Enable WiFi"}
-                      onClick={(e) => handleToggleWifi(e, d)}
-                      disabled={togglingSerial === d.serial}
+                      <div className="mt-0.5 text-[11px] leading-tight truncate text-text-3">
+                        {isConnecting ? "Starting stream..." : <>{isNetworkSerial(d.serial) ? "Wi-Fi" : "USB"} · <span className="font-mono">{truncateSerial(d.serial)}</span></>}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {isConnecting ? (
+                        <div className="size-4 border-[1.5px] border-border border-t-brand rounded-full animate-spin" />
+                      ) : (
+                        <>
+                          <Button
+                            variant="ghost"
+                            className={cn(
+                              "size-7 p-0 rounded-md border-transparent bg-transparent shadow-none press [&_svg]:size-[15px]",
+                              "hover:bg-transparent dark:hover:bg-transparent hover:text-foreground",
+                              wifiOn ? "text-brand hover:text-brand" : "text-text-3",
+                            )}
+                            title={wifiOn ? "Turn off Wi-Fi debugging" : "Turn on Wi-Fi debugging"}
+                            onClick={(e) => handleToggleWifi(e, d)}
+                            disabled={togglingSerial === d.serial}
+                          >
+                            {togglingSerial === d.serial ? <div className="size-3.5 border-[1.5px] border-border border-t-brand rounded-full animate-spin" /> : <WifiIcon />}
+                          </Button>
+                          <ChevronRightIcon className="size-3.5 text-text-3" />
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {tailnetPeers.length > 0 && (
+            <div className="shrink-0 max-h-[180px] flex flex-col animate-in fade-in duration-300">
+              <div className="flex items-center px-5 h-8 shrink-0 border-t border-border">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-text-3">
+                  Tailnet · {tailnetPeers.length}
+                </span>
+              </div>
+              <div className="min-h-0 overflow-y-auto no-scrollbar px-2 pb-1.5">
+                {tailnetPeers.map((peer) => {
+                  const isConnecting = tailnetConnecting === peer.address || connectingSerial === peer.address;
+                  return (
+                    <div
+                      key={peer.address}
+                      role="button"
+                      tabIndex={0}
+                      title={peer.dns_name || peer.address}
+                      className={cn(
+                        "group h-[52px] px-3 rounded-[10px] flex items-center gap-3 cursor-default outline-none press",
+                        "focus-visible:bg-surface-2",
+                        isConnecting ? "bg-surface-2" : peer.online && !connectingSerial && "hover-dim",
+                        !peer.online && "opacity-50",
+                      )}
+                      onClick={() => handleTailnetConnect(peer)}
+                      onKeyDown={(e) => { if (e.key === "Enter") handleTailnetConnect(peer); }}
                     >
-                      {togglingSerial === d.serial ? <div className="size-3.5 border-2 border-border border-t-brand rounded-full animate-spin" /> : <WifiIcon />}
-                    </Button>
-                    <ChevronRightIcon className="size-3.5 text-text-3" />
-                  </>
-                )}
+                      <div className="size-8 rounded-lg bg-surface-2 border border-border flex items-center justify-center text-text-2 shrink-0 [&_svg]:size-4">
+                        <GlobeAltIcon />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[13px] font-medium leading-tight truncate">{peer.name}</div>
+                        <div className="mt-0.5 text-[11px] leading-tight truncate text-text-3">
+                          {isConnecting ? "Connecting..." : tailnetPath(peer)}
+                        </div>
+                      </div>
+                      {isConnecting ? (
+                        <div className="size-4 border-[1.5px] border-border border-t-brand rounded-full animate-spin" />
+                      ) : (
+                        peer.online && <ChevronRightIcon className="size-3.5 text-text-3" />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
-          ))
-        )}
-      </div>
+          )}
+        </section>
+
+        <footer className="h-11 shrink-0 border-t border-border px-3 flex items-center justify-between">
+          {devices.length > 0 ? <Button variant="ghost" size="sm" className="h-7 px-2 rounded-md text-[12px] font-normal gap-1.5 text-text-2 hover:bg-transparent dark:hover:bg-transparent hover:text-foreground press [&_svg]:size-3.5" onClick={() => setShowWifiDialog(true)}>
+            <WifiIcon /> Connect by IP
+          </Button> : <span />}
+          {version && <span className="pr-2 font-mono text-[10.5px] text-text-3">v{version}</span>}
+        </footer>
+      </main>
 
       {contextMenu && (
         <div
           ref={contextMenuRef}
-          className="fixed z-100 min-w-40 bg-surface border border-border rounded-lg p-1 shadow-[0_8px_24px_rgba(0,0,0,0.3)] animate-in fade-in duration-100"
+          className="fixed z-100 min-w-44 bg-popover border border-border rounded-[10px] p-1 shadow-(--float-shadow) animate-in fade-in zoom-in-95 duration-100 origin-top-left"
           style={{ top: contextMenu.y, left: contextMenu.x }}
         >
-          <Button variant="ghost" className="block w-full h-auto justify-start py-1.5 px-2.5 text-xs font-normal text-foreground bg-transparent border-transparent rounded-[5px] shadow-none hover:bg-surface-hover" onClick={() => {
+          <Button variant="ghost" className={menuItemClass} onClick={() => {
             onConnectDevice(contextMenu.device);
             setContextMenu(null);
           }}>
             Connect
           </Button>
-          <Button variant="ghost" className="block w-full h-auto justify-start py-1.5 px-2.5 text-xs font-normal text-foreground bg-transparent border-transparent rounded-[5px] shadow-none hover:bg-surface-hover" onClick={() => {
+          <Button variant="ghost" className={menuItemClass} onClick={() => {
             setEditingSerial(contextMenu.device.serial);
             setEditValue(getDeviceDisplayName(contextMenu.device));
             setContextMenu(null);
@@ -245,59 +376,69 @@ export function WelcomeScreen({
             Rename
           </Button>
           {getDeviceNickname(contextMenu.device.serial) && (
-            <Button variant="ghost" className="block w-full h-auto justify-start py-1.5 px-2.5 text-xs font-normal text-foreground bg-transparent border-transparent rounded-[5px] shadow-none hover:bg-surface-hover" onClick={() => {
+            <Button variant="ghost" className={menuItemClass} onClick={() => {
               setDeviceNickname(contextMenu.device.serial, "");
               setContextMenu(null);
             }}>
-              Reset Name
+              Reset name
             </Button>
           )}
-          <Button variant="ghost" className="block w-full h-auto justify-start py-1.5 px-2.5 text-xs font-normal text-foreground bg-transparent border-transparent rounded-[5px] shadow-none hover:bg-surface-hover" onClick={() => {
+          <Button variant="ghost" className={menuItemClass} onClick={() => {
             handleToggleWifi({ stopPropagation: () => {} } as React.MouseEvent, contextMenu.device);
             setContextMenu(null);
           }}>
-            {isWifiDevice(contextMenu.device.serial) ? "Disable WiFi" : "Enable WiFi"}
+            {isNetworkSerial(contextMenu.device.serial) ? "Turn off Wi-Fi debugging" : "Turn on Wi-Fi debugging"}
           </Button>
           <div className="h-px bg-border mx-1.5 my-1" />
-          <Button variant="ghost" className="block w-full h-auto justify-start py-1.5 px-2.5 text-xs font-normal text-foreground bg-transparent border-transparent rounded-[5px] shadow-none hover:bg-surface-hover" onClick={() => {
+          <Button variant="ghost" className={menuItemClass} onClick={() => {
             navigator.clipboard.writeText(contextMenu.device.serial);
             showToast("Serial copied", "info");
             setContextMenu(null);
           }}>
-            Copy Serial
+            Copy serial
           </Button>
         </div>
       )}
 
-      <span className="absolute bottom-3 text-[9px] text-text-3/50">v0.3.0</span>
-
       <Dialog open={showWifiDialog} onOpenChange={setShowWifiDialog}>
         <DialogPortal>
           <DialogOverlay />
-          <DialogPrimitive.Popup className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[340px] max-w-[90vw] bg-surface border border-border rounded-[14px] z-50 shadow-lg animate-in fade-in zoom-in-95 duration-100">
-            <DialogTitle className="text-[15px] font-semibold px-5 pt-5">Connect by IP</DialogTitle>
-            <div className="px-5 py-4">
-              <p className="text-xs text-muted-foreground leading-relaxed mb-3">
-                On your Android device, go to <strong className="text-foreground">Settings &gt; About phone &gt; Status</strong> to find your IP address. Both devices must be on the same network.
+          <DialogPrimitive.Popup className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[320px] max-w-[calc(100vw-32px)] bg-popover border border-border rounded-xl z-50 shadow-(--float-shadow) outline-none animate-in fade-in zoom-in-[0.97] duration-150">
+            <div className="flex items-center justify-between px-4 pt-3.5">
+              <DialogTitle className="text-[13.5px] font-semibold">Connect by IP</DialogTitle>
+              <kbd className="h-[18px] px-1.5 inline-flex items-center rounded-[4px] border border-border bg-surface-2 font-mono text-[10px] text-text-3">esc</kbd>
+            </div>
+            <div className="px-4 pt-3">
+              <input
+                aria-label="IP address"
+                className="w-full h-8 px-2.5 bg-surface-2 border border-border rounded-lg font-mono text-[12.5px] text-foreground outline-none transition-colors focus:border-input placeholder:text-text-3"
+                type="text"
+                placeholder="192.168.1.24:5555"
+                value={wifiAddress}
+                onChange={(e) => setWifiAddress(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleWifiConnect()}
+                spellCheck={false}
+                autoFocus
+              />
+              <p className="mt-2 text-[11.5px] leading-[1.5] text-text-3">
+                Same Wi-Fi as this computer. The IP is in Settings &gt; About phone &gt; Status.
               </p>
-              <div className="flex gap-2">
-                <input
-                  className="flex-1 min-w-0 py-2 px-2.5 bg-surface-2 border border-border rounded-lg text-[13px] text-foreground outline-none focus:border-brand placeholder:text-text-3"
-                  type="text"
-                  placeholder="192.168.1.100"
-                  value={wifiAddress}
-                  onChange={(e) => setWifiAddress(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleWifiConnect()}
-                  autoFocus
-                />
-                <Button
-                  className="shrink-0"
-                  onClick={handleWifiConnect}
-                  disabled={wifiConnecting || !wifiAddress.trim()}
-                >
-                  {wifiConnecting ? <div className="size-3.5 border-2 border-border border-t-brand rounded-full animate-spin" /> : "Connect"}
-                </Button>
-              </div>
+            </div>
+            <div className="mt-4 px-4 py-3 border-t border-border flex justify-end gap-2">
+              <Button
+                variant="outline"
+                className="h-7 rounded-lg px-3 text-[12px] font-medium border-input bg-transparent dark:bg-transparent hover:bg-transparent dark:hover:bg-transparent hover-dim press"
+                onClick={() => setShowWifiDialog(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                className="h-7 min-w-[76px] rounded-lg px-3 text-[12px] font-medium bg-foreground text-background hover:bg-foreground hover-dim press disabled:opacity-35"
+                onClick={handleWifiConnect}
+                disabled={wifiConnecting || !wifiAddress.trim()}
+              >
+                {wifiConnecting ? <div className="size-3 border-[1.5px] border-background/30 border-t-background rounded-full animate-spin" /> : "Connect"}
+              </Button>
             </div>
           </DialogPrimitive.Popup>
         </DialogPortal>

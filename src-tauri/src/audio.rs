@@ -1,8 +1,8 @@
+use another_core::transport::DeviceStream;
 use anyhow::Result;
 use rodio::{buffer::SamplesBuffer, OutputStream, Sink};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
 const FLAG_CONFIG: u64 = 1 << 63;
@@ -43,7 +43,7 @@ impl AudioHandle {
 }
 
 pub async fn stream_audio(
-    mut audio_socket: TcpStream,
+    mut audio_socket: DeviceStream,
     audio: Arc<AudioHandle>,
     shutdown: Arc<Notify>,
 ) {
@@ -57,7 +57,7 @@ pub async fn stream_audio(
     }
 }
 
-async fn playback_loop(socket: &mut TcpStream, sink: &Sink) -> Result<()> {
+async fn playback_loop(socket: &mut DeviceStream, sink: &Sink) -> Result<()> {
     let mut packet_count: u64 = 0;
 
     loop {

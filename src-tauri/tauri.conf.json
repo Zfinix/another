@@ -28,6 +28,11 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["another"]
+      }
+    },
     "updater": {
       "endpoints": [
         "https://github.com/Zfinix/another/releases/latest/download/latest.json"

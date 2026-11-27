@@ -29,8 +29,10 @@ import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import type { Settings, QuickActionId } from "../types";
-import { PRESETS, RESOLUTION_OPTIONS, CODEC_OPTIONS, QUICK_ACTIONS } from "../types";
+import type { Settings, QuickActionId, DevSettings } from "../types";
+import type { LatencyResult } from "../hooks/useLatencyProbe";
+import { PRESETS, RESOLUTION_OPTIONS, CODEC_OPTIONS, QUICK_ACTIONS, ENCODER_TUNING_OPTIONS } from "../types";
+import type { EncoderTuning } from "../types";
 
 const DEFAULT_MCP_PORT = 7070;
 const APP_VERSION = "0.3.0";
@@ -56,6 +58,17 @@ interface SettingsDialogProps {
   onApplyPreset: (name: string) => void;
   onUpdateSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
   onPinnedActionsChange: (actions: QuickActionId[]) => void;
+  devSettings: DevSettings;
+  onUpdateDevSetting: <K extends keyof DevSettings>(key: K, value: DevSettings[K]) => void;
+  latencyProbe: {
+    running: boolean;
+    result: LatencyResult | null;
+    error: string | null;
+    run: () => void;
+  } | null;
+  onExportProfile: () => void;
+  onImportProfile: () => void;
+  onCopyProfileLink: () => void;
 }
 
 function copyToClipboard(text: string) {
@@ -80,6 +93,12 @@ export function SettingsDialog({
   onApplyPreset,
   onUpdateSetting,
   onPinnedActionsChange,
+  devSettings,
+  onUpdateDevSetting,
+  latencyProbe,
+  onExportProfile,
+  onImportProfile,
+  onCopyProfileLink,
 }: SettingsDialogProps) {
   const [mcpInstructionsOpen, setMcpInstructionsOpen] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
@@ -91,6 +110,7 @@ export function SettingsDialog({
   const [mcpOpen, setMcpOpen] = useState(true);
   const [savePath, setSavePath] = useState(() => localStorage.getItem("save_path") || "");
   const [toolbarOpen, setToolbarOpen] = useState(true);
+  const [developerOpen, setDeveloperOpen] = useState(true);
 
   const [mcpEnabled, setMcpEnabled] = useState(() => {
     const stored = localStorage.getItem("mcp_enabled");
@@ -236,6 +256,16 @@ export function SettingsDialog({
                   />
                 </div>
                 <div className="text-[11px] text-text-3 mt-1">Automatically adjusts quality based on network conditions</div>
+
+                <div className="flex items-center justify-between mt-4">
+                  <span className="text-[13px] font-medium text-foreground">Always adapt on Wi-Fi</span>
+                  <Switch
+                    checked={settings.adaptive || settings.adaptive_network !== false}
+                    disabled={settings.adaptive}
+                    onCheckedChange={(checked) => onUpdateSetting("adaptive_network", checked)}
+                  />
+                </div>
+                <div className="text-[11px] text-text-3 mt-1">Wi-Fi and tailnet links change by the second, so quality adapts there even when Adaptive Quality is off</div>
               </div>
             </CollapsibleContent>
           </Collapsible>
@@ -373,6 +403,130 @@ export function SettingsDialog({
                         </div>
                       </div>
                     )}
+                  </div>
+                )}
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+
+          <Collapsible open={developerOpen} onOpenChange={setDeveloperOpen}>
+            <SectionHeader open={developerOpen}>Developer</SectionHeader>
+            <CollapsibleContent>
+              <div className="px-5 py-4 border-b border-border/60">
+                <div className="flex items-center justify-between">
+                  <span className="text-[13px] font-medium text-foreground">Profile</span>
+                  <div className="flex items-center gap-1.5">
+                    <Button variant="outline" size="sm" className="text-[11px]" onClick={onImportProfile}>Import</Button>
+                    <Button variant="outline" size="sm" className="text-[11px]" onClick={onExportProfile}>Export</Button>
+                    <Button variant="outline" size="sm" className="text-[11px]" onClick={onCopyProfileLink}>Copy link</Button>
+                  </div>
+                </div>
+                <div className="text-[11px] text-text-3 mt-1 mb-4">Video and developer settings as a JSON file or an another:// link. The another CLI uses the same format.</div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-[13px] font-medium text-foreground">Performance overlay</span>
+                  <Switch
+                    checked={devSettings.perfOverlay}
+                    onCheckedChange={(checked) => onUpdateDevSetting("perfOverlay", checked)}
+                  />
+                </div>
+                <div className="text-[11px] text-text-3 mt-1">Shows FPS, bitrate and decode time on the mirror</div>
+
+                <div className="flex items-center justify-between mt-4">
+                  <span className="text-[13px] font-medium text-foreground">Direct ADB transport</span>
+                  <Switch
+                    checked={devSettings.directAdb}
+                    onCheckedChange={(checked) => onUpdateDevSetting("directAdb", checked)}
+                  />
+                </div>
+                <div className="text-[11px] text-text-3 mt-1">Experimental. Talks to emulators and Wi-Fi devices without the adb server. May disconnect.</div>
+
+                <div className="flex items-center justify-between mt-4">
+                  <span className="text-[13px] font-medium text-foreground">Low-latency pipeline</span>
+                  <Switch
+                    checked={devSettings.lowLatency}
+                    onCheckedChange={(checked) => onUpdateDevSetting("lowLatency", checked)}
+                  />
+                </div>
+                <div className="text-[11px] text-text-3 mt-1">Binary video over a local WebSocket with low-latency encoder and decoder hints. Falls back to the old path if the socket fails.</div>
+
+                {devSettings.lowLatency && (
+                  <>
+                    <div className="flex items-center justify-between mt-4">
+                      <span className="text-[13px] font-medium text-foreground">Encoder tuning</span>
+                      <Select
+                        value={devSettings.encoderTuning}
+                        onValueChange={(val) => onUpdateDevSetting("encoderTuning", val as EncoderTuning)}
+                      >
+                        <SelectTrigger className="h-8 text-xs">
+                          <SelectValue>{ENCODER_TUNING_OPTIONS.find((o) => o.value === devSettings.encoderTuning)?.label}</SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {ENCODER_TUNING_OPTIONS.map((opt) => (
+                            <SelectItem key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="text-[11px] text-text-3 mt-1">Extra encoder options to compare with the latency probe. Not every phone supports every option.</div>
+                  </>
+                )}
+
+                <div className="flex items-center justify-between mt-4">
+                  <span className="text-[13px] font-medium text-foreground">Another server</span>
+                  <Switch
+                    checked={devSettings.anotherServer}
+                    onCheckedChange={(checked) => onUpdateDevSetting("anotherServer", checked)}
+                  />
+                </div>
+                <div className="text-[11px] text-text-3 mt-1">Experimental. Our scrcpy fork: bitrate changes without reconnecting, key frames on request, and stale frames dropped instead of queued.</div>
+
+                <div className="flex items-center justify-between mt-4">
+                  <span className="text-[13px] font-medium text-foreground">Direct network stream</span>
+                  <Switch
+                    checked={devSettings.networkStream}
+                    disabled={!devSettings.anotherServer}
+                    onCheckedChange={(checked) => onUpdateDevSetting("networkStream", checked)}
+                  />
+                </div>
+                <div className="text-[11px] text-text-3 mt-1">For Wi-Fi and tailnet devices on the Another server. Video and input go straight to the phone over TCP instead of through adb, which waits for an acknowledgement on every write. Each session uses a one-time token.</div>
+
+                {navigator.userAgent.includes("Mac") && (
+                  <>
+                    <div className="flex items-center justify-between mt-4">
+                      <span className="text-[13px] font-medium text-foreground">Native video</span>
+                      <Switch
+                        checked={devSettings.nativeVideo}
+                        onCheckedChange={(checked) => onUpdateDevSetting("nativeVideo", checked)}
+                      />
+                    </div>
+                    <div className="text-[11px] text-text-3 mt-1">Experimental. Decodes with VideoToolbox and shows frames on a Core Animation layer, skipping the webview.</div>
+                  </>
+                )}
+
+                {latencyProbe && (
+                  <div className="mt-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[13px] font-medium text-foreground">Touch-to-screen latency</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-[11px]"
+                        disabled={latencyProbe.running}
+                        onClick={latencyProbe.run}
+                      >
+                        {latencyProbe.running ? "Measuring" : "Measure"}
+                      </Button>
+                    </div>
+                    <div className="text-[11px] text-text-3 mt-1">
+                      {latencyProbe.error
+                        ? latencyProbe.error
+                        : latencyProbe.result
+                          ? `Median ${latencyProbe.result.medianMs.toFixed(0)} ms · p90 ${latencyProbe.result.p90Ms.toFixed(0)} ms · best ${latencyProbe.result.minMs.toFixed(0)} ms · ${latencyProbe.result.samples} taps${latencyProbe.result.misses ? `, ${latencyProbe.result.misses} missed` : ""}`
+                          : "Taps the status bar with Show taps on and times until the dot is drawn."}
+                    </div>
                   </div>
                 )}
               </div>

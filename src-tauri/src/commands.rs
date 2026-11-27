@@ -2,10 +2,14 @@ use another_core::{adb, control, macro_engine, scrcpy};
 use another_core::scrcpy::StreamSettings;
 use crate::audio::{self, AudioHandle};
 use crate::state::{AppState, ScrcpySession};
+use crate::native_video;
+use crate::remote::RemoteState;
+use crate::stream_ws;
 use crate::video::{self, FrameEvent};
 use base64::Engine;
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
@@ -17,6 +21,9 @@ pub async fn list_devices() -> Result<Vec<adb::Device>, String> {
     adb::list_devices().await.map_err(|e| e.to_string())
 }
 
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+const VIEWER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[tauri::command]
 pub async fn connect_device(
     app: AppHandle,
@@ -24,7 +31,7 @@ pub async fn connect_device(
     on_frame: Channel<FrameEvent>,
     settings: StreamSettings,
     state: State<'_, AppState>,
-) -> Result<(u32, u32), String> {
+) -> Result<(u32, u32, Option<String>, bool), String> {
     {
         let mut session = state.session.lock().await;
         if let Some(s) = session.take() {
@@ -37,12 +44,38 @@ pub async fn connect_device(
         .path()
         .resource_dir()
         .map_err(|e| format!("Failed to get resource dir: {}", e))?;
-    let server_path = resource_dir
-        .join("resources")
-        .join("scrcpy-server-v2.7");
+    let server_path = resource_dir.join("resources").join(settings.server_file());
     let server_path_str = server_path.to_string_lossy().to_string();
 
     let port: u16 = 27183;
+
+    let native = if settings.native_video {
+        let window = app
+            .get_webview_window("main")
+            .or_else(|| app.webview_windows().into_values().next());
+        match window.map(|w| native_video::NativeVideo::attach(w, on_frame.clone())) {
+            Some(Ok(native)) => Some(native),
+            Some(Err(e)) => {
+                eprintln!("[native-video] falling back to the web renderer: {}", e);
+                None
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let native_active = native.is_some();
+
+    let ws_endpoint = if settings.low_latency && !native_active {
+        Some(
+            stream_ws::bind()
+                .await
+                .map_err(|e| format!("Failed to open the video stream: {}", e))?,
+        )
+    } else {
+        None
+    };
+    let ws_url = ws_endpoint.as_ref().map(|endpoint| endpoint.url.clone());
 
     let (streams, mut server_process) =
         scrcpy::start_server(&serial, &server_path_str, port, &settings)
@@ -66,13 +99,16 @@ pub async fn connect_device(
         None
     };
 
+    let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let session = ScrcpySession {
+        id: session_id,
         device_serial: serial.clone(),
         control_socket: control_socket.clone(),
         screen_width: streams.screen_width,
         screen_height: streams.screen_height,
         shutdown: shutdown.clone(),
         audio: audio_handle,
+        live_video_control: settings.another_server,
     };
 
     let width = streams.screen_width;
@@ -93,14 +129,60 @@ pub async fn connect_device(
     };
 
     tokio::spawn(async move {
-        video::stream_video(streams.video_socket, on_frame, shutdown.clone(), video_codec).await;
-        scrcpy::stop_server(&serial_clone, port).await;
+        let ws = match ws_endpoint {
+            Some(endpoint) => endpoint.accept(VIEWER_CONNECT_TIMEOUT).await.map(Some),
+            None => Ok(None),
+        };
+        match ws {
+            Ok(ws) => {
+                video::stream_video(streams.video_socket, on_frame, ws, native, shutdown.clone(), video_codec)
+                    .await
+            }
+            Err(e) => {
+                let _ = on_frame.send(FrameEvent::Disconnected {
+                    reason: e.to_string(),
+                });
+            }
+        }
         let _ = server_process.kill().await;
         let mut s = session_arc.lock().await;
-        *s = None;
+        if s.as_ref().is_some_and(|current| current.id == session_id) {
+            *s = None;
+            drop(s);
+            scrcpy::stop_server(&serial_clone, port).await;
+        }
     });
 
-    Ok((width, height))
+    Ok((width, height, ws_url, native_active))
+}
+
+const NATIVE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+#[tauri::command]
+pub async fn native_latency_probe(x: f64, y: f64, state: State<'_, AppState>) -> Result<f64, String> {
+    let (socket, width, height) = {
+        let session = state.session.lock().await;
+        let session = session.as_ref().ok_or("Not connected")?;
+        (session.control_socket.clone(), session.screen_width, session.screen_height)
+    };
+    let px = (x * width as f64) as u32;
+    let py = (y * height as f64) as u32;
+    let seen = native_video::arm_probe(x, y).map_err(|e| e.to_string())?;
+    let started = std::time::Instant::now();
+    let pressed = control::inject_touch(&socket, "down", px, py, width as u16, height as u16).await;
+    let result = tokio::task::spawn_blocking(move || seen.recv_timeout(NATIVE_PROBE_TIMEOUT)).await;
+    native_video::disarm_probe();
+    let _ = control::inject_touch(&socket, "up", px, py, width as u16, height as u16).await;
+    pressed.map_err(|e| e.to_string())?;
+    match result {
+        Ok(Ok(shown)) => Ok(shown.duration_since(started).as_secs_f64() * 1000.0),
+        _ => Err("The tap never showed up on screen".into()),
+    }
+}
+
+#[tauri::command]
+pub fn set_native_video_frame(x: f64, y: f64, width: f64, height: f64) {
+    native_video::set_frame(x, y, width, height);
 }
 
 #[tauri::command]
@@ -501,6 +583,11 @@ pub async fn wifi_connect(address: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn tailnet_status() -> Result<another_core::tailnet::TailnetStatus, String> {
+    another_core::tailnet::status().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn wifi_disconnect(address: String) -> Result<(), String> {
     adb::disconnect_device(&address).await.map_err(|e| e.to_string())
 }
@@ -556,7 +643,7 @@ pub async fn start_mcp_server(
         .ok()
         .map(|dir| {
             dir.join("resources")
-                .join("scrcpy-server-v2.7")
+                .join(scrcpy::SCRCPY_SERVER_FILE)
                 .to_string_lossy()
                 .to_string()
         });
@@ -584,6 +671,88 @@ pub async fn stop_mcp_server(state: State<'_, AppState>) -> Result<(), String> {
         ct.cancel();
     }
     Ok(())
+}
+
+async fn live_control_socket(state: &State<'_, AppState>) -> Result<Arc<Mutex<another_core::transport::DeviceStream>>, String> {
+    let session = state.session.lock().await;
+    let session = session.as_ref().ok_or("Not connected")?;
+    if !session.live_video_control {
+        return Err("Live video control needs the Another server".into());
+    }
+    Ok(session.control_socket.clone())
+}
+
+#[tauri::command]
+pub async fn set_video_bit_rate(bit_rate: u32, state: State<'_, AppState>) -> Result<(), String> {
+    let socket = live_control_socket(&state).await?;
+    control::set_video_bit_rate(&socket, bit_rate)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_video_size(max_size: u32, max_fps: u32, state: State<'_, AppState>) -> Result<(), String> {
+    let serial = state
+        .session
+        .lock()
+        .await
+        .as_ref()
+        .map(|session| session.device_serial.clone())
+        .ok_or("Not connected")?;
+    let socket = live_control_socket(&state).await?;
+    let peak = adb::peak_refresh_rate(&serial).await.map_or(u32::MAX, |rate| rate.round() as u32);
+    let max_size = max_size.min(u32::from(u16::MAX)) as u16;
+    let max_fps = max_fps.min(peak).min(u32::from(u16::MAX)) as u16;
+    control::set_video_size(&socket, max_size, max_fps)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn request_key_frame(state: State<'_, AppState>) -> Result<(), String> {
+    let socket = live_control_socket(&state).await?;
+    control::request_key_frame(&socket).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_show_touches(enabled: bool, state: State<'_, AppState>) -> Result<bool, String> {
+    let serial = {
+        let session = state.session.lock().await;
+        session.as_ref().ok_or("Not connected")?.device_serial.clone()
+    };
+    let previous = adb::shell_text(&serial, "settings get system show_touches")
+        .await
+        .map_err(|e| e.to_string())?;
+    adb::shell_text(
+        &serial,
+        &format!("settings put system show_touches {}", u8::from(enabled)),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(previous.trim() == "1")
+}
+
+#[tauri::command]
+pub fn log_perf(stats: serde_json::Value, remote: State<'_, Arc<RemoteState>>) {
+    remote.record_perf(&stats);
+    eprintln!("[perf] {}", stats);
+}
+
+#[tauri::command]
+pub fn report_ui_state(state: serde_json::Value, remote: State<'_, Arc<RemoteState>>) {
+    remote.set_ui(state);
+}
+
+#[tauri::command]
+pub fn take_pending_commands(remote: State<'_, Arc<RemoteState>>) -> Vec<serde_json::Value> {
+    remote.take_pending()
+}
+
+#[tauri::command]
+pub async fn read_text_file(path: String) -> Result<String, String> {
+    tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("Failed to read {}: {}", path, e))
 }
 
 #[tauri::command]

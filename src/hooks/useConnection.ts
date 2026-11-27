@@ -2,7 +2,61 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import type { Device, Settings, FrameEvent, Screen, MacroEvent } from "../types";
+import type { Device, Settings, FrameEvent, Screen, MacroEvent, PerfStats, EncoderTuning, DevSettings } from "../types";
+
+export const CHROME_H = 40;
+export const FRAME_PAD = 8;
+const MAX_VIEW = 860;
+const PERF_INTERVAL_MS = 1000;
+const VIDEO_KIND_CONFIG = 0;
+const VIDEO_KIND_KEY = 1;
+const VIDEO_HEADER_LEN = 25;
+const MAX_TRACKED_DECODES = 300;
+
+interface PerfCounters {
+  packets: number;
+  bytes: number;
+  decoded: number;
+  rendered: number;
+  dropped: number;
+  decodeMsTotal: number;
+  decodeSamples: number;
+  pipelineMsTotal: number;
+  pipelineSamples: number;
+  lagMsTotal: number;
+  lagMsMax: number;
+  screenMsTotal: number;
+  screenMsMax: number;
+  screenSamples: number;
+}
+
+const emptyCounters = (): PerfCounters => ({
+  packets: 0,
+  bytes: 0,
+  decoded: 0,
+  rendered: 0,
+  dropped: 0,
+  decodeMsTotal: 0,
+  decodeSamples: 0,
+  pipelineMsTotal: 0,
+  pipelineSamples: 0,
+  lagMsTotal: 0,
+  lagMsMax: 0,
+  screenMsTotal: 0,
+  screenMsMax: 0,
+  screenSamples: 0,
+});
+
+const epochNow = () => performance.timeOrigin + performance.now();
+
+const SAME_ASPECT_TOLERANCE = 0.02;
+
+function windowSizeFor(width: number, height: number) {
+  const aspect = width / height;
+  const viewW = aspect > 1 ? MAX_VIEW : Math.round(MAX_VIEW * aspect);
+  const viewH = aspect > 1 ? Math.round(MAX_VIEW / aspect) : MAX_VIEW;
+  return new LogicalSize(Math.max(viewW, 280) + FRAME_PAD * 2, viewH + CHROME_H + FRAME_PAD);
+}
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -21,8 +75,17 @@ interface UseConnectionOptions {
   setThemePref: (fn: (p: "light" | "dark" | "auto") => "light" | "dark" | "auto") => void;
   onToggleAlwaysOnTop: () => void;
   onFrameReceived?: () => void;
+  onPacketReceived?: (ptsUs: number) => void;
+  onNativeStats?: (fps: number, lagMinMs: number) => void;
   onCodecFallback?: (codec: string) => void;
   onRecordEvent?: (event: MacroEvent) => void;
+  perfOverlay?: boolean;
+  directAdb?: boolean;
+  lowLatency?: boolean;
+  encoderTuning?: EncoderTuning;
+  anotherServer?: boolean;
+  nativeVideo?: boolean;
+  networkStream?: boolean;
 }
 
 export function useConnection(opts: UseConnectionOptions) {
@@ -46,6 +109,49 @@ export function useConnection(opts: UseConnectionOptions) {
   const displaySizeRef = useRef({ width: 1080, height: 1920 });
   const resizeSnapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isProgrammaticResize = useRef(false);
+  const connectionGen = useRef(0);
+  const pendingPackets = useRef<EncodedVideoChunk[]>([]);
+  const awaitingKeyFrame = useRef(true);
+  const [streamReady, setStreamReady] = useState(false);
+  const streamReadyRef = useRef(false);
+  const perfCounters = useRef<PerfCounters>(emptyCounters());
+  const decodeStarts = useRef(new Map<number, number>());
+  const recvTimes = useRef(new Map<number, number>());
+  const captureTimes = useRef(new Map<number, number>());
+  const lagBaseline = useRef<{ offset: number; lastPts: number } | null>(null);
+  const codecRef = useRef("");
+  const [perfStats, setPerfStats] = useState<PerfStats | null>(null);
+  const directAdbRef = useRef(!!opts.directAdb);
+  directAdbRef.current = !!opts.directAdb;
+  const lowLatencyRef = useRef(!!opts.lowLatency);
+  lowLatencyRef.current = !!opts.lowLatency;
+  const encoderTuningRef = useRef<EncoderTuning>(opts.encoderTuning ?? "default");
+  encoderTuningRef.current = opts.encoderTuning ?? "default";
+  const anotherServerRef = useRef(!!opts.anotherServer);
+  anotherServerRef.current = !!opts.anotherServer;
+  const nativeVideoRef = useRef(!!opts.nativeVideo);
+  nativeVideoRef.current = !!opts.nativeVideo;
+  const networkStreamRef = useRef(opts.networkStream !== false);
+  networkStreamRef.current = opts.networkStream !== false;
+  const [nativeActive, setNativeActive] = useState(false);
+  const nativeActiveRef = useRef(false);
+  nativeActiveRef.current = nativeActive;
+  const perfOverlayRef = useRef(!!opts.perfOverlay);
+  perfOverlayRef.current = !!opts.perfOverlay;
+  const videoSocketRef = useRef<WebSocket | null>(null);
+  const videoSocketFailed = useRef(false);
+  const frameDrawnRef = useRef<(() => void) | null>(null);
+  const reconnectRef = useRef<((device: Device, s: Settings) => void) | null>(null);
+
+  const closeVideoSocket = useCallback(() => {
+    const ws = videoSocketRef.current;
+    videoSocketRef.current = null;
+    if (ws) {
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.close();
+    }
+  }, []);
 
   const cleanupDecoder = useCallback(() => {
     if (rafId.current) {
@@ -58,8 +164,10 @@ export function useConnection(opts: UseConnectionOptions) {
     }
     if (decoderRef.current && decoderRef.current.state !== "closed") {
       decoderRef.current.close();
-      decoderRef.current = null;
     }
+    decoderRef.current = null;
+    pendingPackets.current = [];
+    awaitingKeyFrame.current = true;
     setMutedState(false);
     if (recorderRef.current && recorderRef.current.state === "recording") {
       recorderRef.current.stop();
@@ -71,93 +179,228 @@ export function useConnection(opts: UseConnectionOptions) {
     try { await invoke("set_muted", { muted: m }); } catch { }
   }, []);
 
-  const connectToDevice = useCallback(async (device: Device, s: Settings, silent = false) => {
+  const feedChunk = useCallback((chunk: EncodedVideoChunk) => {
+    const decoder = decoderRef.current;
+    if (!decoder || decoder.state !== "configured") return;
+    if (awaitingKeyFrame.current) {
+      if (chunk.type !== "key") return;
+      awaitingKeyFrame.current = false;
+    }
+    try {
+      if (decodeStarts.current.size > MAX_TRACKED_DECODES) decodeStarts.current.clear();
+      decodeStarts.current.set(chunk.timestamp, performance.now());
+      decoder.decode(chunk);
+    } catch (e) {
+      console.error("Decode failed:", e);
+      awaitingKeyFrame.current = true;
+    }
+  }, []);
+
+  const connectToDevice = useCallback(async (device: Device, s: Settings, silent = false, dev?: DevSettings) => {
+    if (dev) {
+      directAdbRef.current = dev.directAdb;
+      lowLatencyRef.current = dev.lowLatency;
+      encoderTuningRef.current = dev.encoderTuning;
+      anotherServerRef.current = dev.anotherServer;
+      nativeVideoRef.current = dev.nativeVideo;
+      networkStreamRef.current = dev.networkStream;
+      perfOverlayRef.current = dev.perfOverlay;
+    }
+    const gen = ++connectionGen.current;
+    const keepLastFrame = silent && streamReadyRef.current;
+    if (!keepLastFrame) {
+      streamReadyRef.current = false;
+      setStreamReady(false);
+    }
     setConnectingSerial(device.serial);
     cleanupDecoder();
+    closeVideoSocket();
+    const lowLatency = lowLatencyRef.current && !videoSocketFailed.current;
+    const anotherServer = anotherServerRef.current;
     try {
-      const channel = new Channel<FrameEvent>();
-      channel.onmessage = (msg) => {
-        if (msg.event === "config") {
-          cleanupDecoder();
-          const descBytes = b64ToBytes(msg.data.description);
-          const decoder = new VideoDecoder({
+      const resizeToFrame = (canvas: HTMLCanvasElement, width: number, height: number) => {
+        if (canvas.width === width && canvas.height === height) return;
+        canvas.width = width;
+        canvas.height = height;
+        if (nativeSize.current.width === width && nativeSize.current.height === height) return;
+        const previous = nativeSize.current;
+        nativeSize.current = { width, height };
+        displaySizeRef.current = { width, height };
+        invoke("update_screen_size", { width, height });
+        setDeviceSize({ width, height });
+        if (previous.width > 0 && Math.abs(previous.width / previous.height - width / height) < SAME_ASPECT_TOLERANCE) return;
+        isProgrammaticResize.current = true;
+        getCurrentWindow().setSize(windowSizeFor(width, height)).finally(() => {
+          isProgrammaticResize.current = false;
+        });
+      };
+
+      const markStreamReady = () => {
+        if (!streamReadyRef.current) {
+          streamReadyRef.current = true;
+          setStreamReady(true);
+        }
+      };
+
+      const handleConfig = (codec: string, descBytes: Uint8Array) => {
+        cleanupDecoder();
+        codecRef.current = codec;
+        const config: VideoDecoderConfig = {
+          codec,
+          description: descBytes,
+          hardwareAcceleration: "prefer-hardware",
+          ...(lowLatency ? { optimizeForLatency: true } : {}),
+        };
+        const createDecoder = (): VideoDecoder => {
+          const decoder: VideoDecoder = new VideoDecoder({
             output: (frame: VideoFrame) => {
               opts.onFrameReceived?.();
-              if (pendingFrame.current) pendingFrame.current.close();
+              const counters = perfCounters.current;
+              counters.decoded++;
+              const started = decodeStarts.current.get(frame.timestamp);
+              if (started !== undefined) {
+                decodeStarts.current.delete(frame.timestamp);
+                counters.decodeMsTotal += performance.now() - started;
+                counters.decodeSamples++;
+              }
+              if (pendingFrame.current) {
+                counters.dropped++;
+                pendingFrame.current.close();
+              }
               pendingFrame.current = frame;
               if (!rafId.current) {
-                rafId.current = requestAnimationFrame(() => {
+                const draw = () => {
                   rafId.current = 0;
                   const f = pendingFrame.current;
                   if (!f) return;
-                  pendingFrame.current = null;
                   const canvas = canvasRef.current;
-                  if (!canvas) { f.close(); return; }
-                  if (canvas.width !== f.displayWidth || canvas.height !== f.displayHeight) {
-                    canvas.width = f.displayWidth;
-                    canvas.height = f.displayHeight;
-                    setDeviceSize((prev) => {
-                      if (prev.width === f.displayWidth && prev.height === f.displayHeight) return prev;
-                      const prevLandscape = prev.width > prev.height;
-                      const nowLandscape = f.displayWidth > f.displayHeight;
-                      if (prevLandscape !== nowLandscape) {
-                        nativeSize.current = { width: nativeSize.current.height, height: nativeSize.current.width };
-                      }
-                      invoke("update_screen_size", { width: nativeSize.current.width, height: nativeSize.current.height });
-                      displaySizeRef.current = { width: f.displayWidth, height: f.displayHeight };
-                      const chromeH = 36;
-                      const aspect = f.displayWidth / f.displayHeight;
-                      const isLandscape = aspect > 1;
-                      let viewW: number, viewH: number;
-                      if (isLandscape) {
-                        const maxViewW = 860;
-                        viewW = maxViewW;
-                        viewH = Math.round(maxViewW / aspect);
-                      } else {
-                        const maxViewH = 860;
-                        viewH = maxViewH;
-                        viewW = Math.round(maxViewH * aspect);
-                      }
-                      isProgrammaticResize.current = true;
-                      getCurrentWindow().setSize(new LogicalSize(Math.max(viewW, 280), viewH + chromeH)).finally(() => {
-                        isProgrammaticResize.current = false;
-                      });
-                      return { width: f.displayWidth, height: f.displayHeight };
-                    });
+                  if (!canvas) {
+                    rafId.current = requestAnimationFrame(draw);
+                    return;
                   }
+                  pendingFrame.current = null;
+                  resizeToFrame(canvas, f.displayWidth, f.displayHeight);
                   const ctx = canvas.getContext("2d");
                   if (ctx) ctx.drawImage(f, 0, 0);
+                  frameDrawnRef.current?.();
+                  const captureMs = captureTimes.current.get(f.timestamp);
+                  if (captureMs !== undefined) {
+                    captureTimes.current.delete(f.timestamp);
+                    const screenMs = epochNow() - captureMs;
+                    perfCounters.current.screenMsTotal += screenMs;
+                    perfCounters.current.screenSamples++;
+                    if (screenMs > perfCounters.current.screenMsMax) perfCounters.current.screenMsMax = screenMs;
+                  }
+                  const recvMs = recvTimes.current.get(f.timestamp);
+                  if (recvMs !== undefined) {
+                    recvTimes.current.delete(f.timestamp);
+                    perfCounters.current.pipelineMsTotal += epochNow() - recvMs;
+                    perfCounters.current.pipelineSamples++;
+                  }
                   f.close();
-                });
+                  perfCounters.current.rendered++;
+                  markStreamReady();
+                };
+                draw();
               }
             },
-            error: (e: DOMException) => console.error("Decoder error:", e),
+            error: (e: DOMException) => {
+              console.error("Decoder error:", e);
+              if (gen !== connectionGen.current) return;
+              decoderRef.current = null;
+              awaitingKeyFrame.current = true;
+              if (anotherServer) invoke("request_key_frame").catch(() => { });
+              const fresh = createDecoder();
+              fresh.configure(config);
+              decoderRef.current = fresh;
+            },
           });
-          const config: VideoDecoderConfig = {
-            codec: msg.data.codec,
-            description: descBytes.buffer,
-            hardwareAcceleration: "prefer-hardware",
-          };
-          VideoDecoder.isConfigSupported(config).then((result) => {
-            if (!result.supported) {
-              // showToast("H.265 not supported on this platform, falling back to H.264", "info");
-              opts.onCodecFallback?.("h264");
-              return;
-            }
-            decoder.configure(config);
-            decoderRef.current = decoder;
-          });
+          return decoder;
+        };
+        VideoDecoder.isConfigSupported(config).then((result) => {
+          if (gen !== connectionGen.current) return;
+          if (!result.supported) {
+            opts.onCodecFallback?.("h264");
+            return;
+          }
+          const decoder = createDecoder();
+          decoder.configure(config);
+          decoderRef.current = decoder;
+          const queued = pendingPackets.current;
+          pendingPackets.current = [];
+          for (const chunk of queued) feedChunk(chunk);
+        });
+      };
+
+      const handlePacket = (key: boolean, timestamp: number, recvMs: number, captureMs: number | null, data: Uint8Array) => {
+        const chunk = new EncodedVideoChunk({
+          type: key ? "key" : "delta",
+          timestamp,
+          data,
+        });
+        opts.onPacketReceived?.(timestamp);
+        if (recvTimes.current.size > MAX_TRACKED_DECODES) recvTimes.current.clear();
+        recvTimes.current.set(timestamp, recvMs);
+        if (captureMs !== null && Number.isFinite(captureMs)) {
+          if (captureTimes.current.size > MAX_TRACKED_DECODES) captureTimes.current.clear();
+          captureTimes.current.set(timestamp, captureMs);
+        }
+        const offset = recvMs - timestamp / 1000;
+        const base = lagBaseline.current;
+        if (!base || timestamp < base.lastPts || offset < base.offset) {
+          lagBaseline.current = { offset, lastPts: timestamp };
+        } else {
+          base.lastPts = timestamp;
+        }
+        const lag = offset - lagBaseline.current!.offset;
+        perfCounters.current.lagMsTotal += lag;
+        if (lag > perfCounters.current.lagMsMax) perfCounters.current.lagMsMax = lag;
+        perfCounters.current.packets++;
+        perfCounters.current.bytes += chunk.byteLength;
+        if (!decoderRef.current) {
+          if (chunk.type === "key") pendingPackets.current = [chunk];
+          else if (pendingPackets.current.length > 0) pendingPackets.current.push(chunk);
+          return;
+        }
+        feedChunk(chunk);
+      };
+
+      const channel = new Channel<FrameEvent>();
+      channel.onmessage = (msg) => {
+        if (gen !== connectionGen.current) return;
+        if (msg.event === "config") {
+          handleConfig(msg.data.codec, b64ToBytes(msg.data.description));
         } else if (msg.event === "packet") {
-          const decoder = decoderRef.current;
-          if (!decoder || decoder.state !== "configured") return;
-          const bytes = b64ToBytes(msg.data.data);
-          decoder.decode(new EncodedVideoChunk({
-            type: msg.data.key ? "key" : "delta",
-            timestamp: msg.data.timestamp,
-            data: bytes,
-          }));
+          handlePacket(msg.data.key, msg.data.timestamp, msg.data.recv_ms, msg.data.capture_ms, b64ToBytes(msg.data.data));
+        } else if (msg.event === "native_size") {
+          const canvas = canvasRef.current;
+          if (canvas) resizeToFrame(canvas, msg.data.width, msg.data.height);
+          markStreamReady();
+        } else if (msg.event === "native_stats") {
+          opts.onNativeStats?.(msg.data.fps, msg.data.lag_min_ms);
+          if (!perfOverlayRef.current) return;
+          const canvas = canvasRef.current;
+          invoke("log_perf", { stats: { renderer: "native", ...msg.data } }).catch(() => { });
+          setPerfStats({
+            renderFps: msg.data.fps,
+            decodeFps: msg.data.fps,
+            packetsPerSec: msg.data.fps,
+            dropped: 0,
+            bitrateKbps: msg.data.kbps,
+            decodeMs: msg.data.decode_ms,
+            pipelineMs: msg.data.decode_ms,
+            deviceLagMs: msg.data.lag_ms,
+            deviceLagMaxMs: msg.data.lag_max_ms,
+            screenMs: msg.data.screen_ms,
+            screenMaxMs: msg.data.screen_max_ms,
+            decodeQueue: 0,
+            width: canvas?.width ?? 0,
+            height: canvas?.height ?? 0,
+            codec: "native",
+          });
         } else if (msg.event === "disconnected") {
           cleanupDecoder();
+          closeVideoSocket();
           if (!isReconnecting.current) {
             setConnectedDevice(null);
             setScreen("welcome");
@@ -167,51 +410,88 @@ export function useConnection(opts: UseConnectionOptions) {
       };
 
       const { adaptive: _, ...streamSettings } = s;
-      const [width, height] = await invoke<[number, number]>("connect_device", {
+      const [width, height, videoUrl, native] = await invoke<[number, number, string | null, boolean]>("connect_device", {
         serial: device.serial,
         onFrame: channel,
-        settings: streamSettings,
+        settings: {
+          ...streamSettings,
+          direct_adb: directAdbRef.current,
+          low_latency: lowLatency,
+          encoder_tuning: encoderTuningRef.current,
+          another_server: anotherServer,
+          native_video: nativeVideoRef.current,
+          network_stream: networkStreamRef.current,
+        },
       });
+      if (gen !== connectionGen.current) return;
+      setNativeActive(native);
+      if (videoUrl) {
+        const ws = new WebSocket(videoUrl);
+        ws.binaryType = "arraybuffer";
+        ws.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+          if (gen !== connectionGen.current) return;
+          receivedVideo = true;
+          const buf = e.data;
+          const view = new DataView(buf);
+          const kind = view.getUint8(0);
+          if (kind === VIDEO_KIND_CONFIG) {
+            const codecLen = view.getUint8(1);
+            const codec = new TextDecoder().decode(new Uint8Array(buf, 2, codecLen));
+            handleConfig(codec, new Uint8Array(buf, 2 + codecLen));
+          } else {
+            const timestamp = Number(view.getBigUint64(1));
+            const recvMs = view.getFloat64(9);
+            const captureMs = view.getFloat64(17);
+            handlePacket(kind === VIDEO_KIND_KEY, timestamp, recvMs, captureMs, new Uint8Array(buf, VIDEO_HEADER_LEN));
+          }
+        };
+        let receivedVideo = false;
+        ws.onerror = () => {
+          if (gen !== connectionGen.current || receivedVideo) return;
+          console.warn("Video WebSocket failed, falling back to IPC");
+          videoSocketFailed.current = true;
+          isReconnecting.current = true;
+          reconnectRef.current?.(device, s);
+        };
+        videoSocketRef.current = ws;
+      }
       nativeSize.current = { width, height };
       displaySizeRef.current = { width, height };
       setDeviceSize({ width, height });
       setConnectedDevice(device);
       setScreen("another");
 
-      const chromeH = 36;
-      const aspect = width / height;
-      const isLandscape = aspect > 1;
-      let viewW: number, viewH: number;
-      if (isLandscape) {
-        const maxViewW = 860;
-        viewW = maxViewW;
-        viewH = Math.round(maxViewW / aspect);
-      } else {
-        const maxViewH = 860;
-        viewH = maxViewH;
-        viewW = Math.round(maxViewH * aspect);
-      }
-      const win = getCurrentWindow();
       isProgrammaticResize.current = true;
-      await win.setSize(new LogicalSize(Math.max(viewW, 280), viewH + chromeH));
+      await getCurrentWindow().setSize(windowSizeFor(width, height));
       isProgrammaticResize.current = false;
     } catch (e) {
       if (!silent) showToast(`Failed to connect: ${e}`);
+      else if (gen === connectionGen.current) {
+        streamReadyRef.current = false;
+        setStreamReady(false);
+        showToast(`Reconnect failed: ${e}`);
+      }
     } finally {
-      setConnectingSerial(null);
-      isReconnecting.current = false;
+      if (gen === connectionGen.current) {
+        setConnectingSerial(null);
+        isReconnecting.current = false;
+      }
     }
-  }, [showToast, cleanupDecoder]);
+  }, [showToast, cleanupDecoder, feedChunk, closeVideoSocket]);
+  reconnectRef.current = (device, s) => { connectToDevice(device, s, true); };
 
   const disconnect = useCallback(async () => {
+    connectionGen.current++;
+    isReconnecting.current = false;
     cleanupDecoder();
+    closeVideoSocket();
     try { await invoke("disconnect_device"); } catch { }
     setConnectedDevice(null);
     setScreen("welcome");
     try {
       await getCurrentWindow().setSize(new LogicalSize(380, 750));
     } catch { }
-  }, [cleanupDecoder]);
+  }, [cleanupDecoder, closeVideoSocket]);
 
   const scheduleReconnect = useCallback((s: Settings) => {
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
@@ -341,7 +621,6 @@ export function useConnection(opts: UseConnectionOptions) {
     if (screen !== "another") return;
     let cancelled = false;
     const win = getCurrentWindow();
-    const chromeH = 36;
     const resizeUnlisten = win.onResized(() => {
       if (isProgrammaticResize.current || cancelled) return;
       if (resizeSnapTimer.current) clearTimeout(resizeSnapTimer.current);
@@ -352,8 +631,8 @@ export function useConnection(opts: UseConnectionOptions) {
             const factor = await win.scaleFactor();
             const inner = await win.innerSize();
             const logical = inner.toLogical(factor);
-            const cw = logical.width;
-            const ch = logical.height - chromeH;
+            const cw = logical.width - FRAME_PAD * 2;
+            const ch = logical.height - CHROME_H - FRAME_PAD;
             if (ch < 200 || cw < 240) return;
             const { width: dw, height: dh } = displaySizeRef.current;
             const targetAspect = dw / dh;
@@ -371,7 +650,7 @@ export function useConnection(opts: UseConnectionOptions) {
             newW = Math.min(Math.max(newW, 280), cw);
             newH = Math.min(Math.max(newH, 240), ch);
             isProgrammaticResize.current = true;
-            await win.setSize(new LogicalSize(newW, newH + chromeH));
+            await win.setSize(new LogicalSize(newW + FRAME_PAD * 2, newH + CHROME_H + FRAME_PAD));
             isProgrammaticResize.current = false;
           } catch {
             isProgrammaticResize.current = false;
@@ -406,12 +685,53 @@ export function useConnection(opts: UseConnectionOptions) {
     return () => { unlisten.then((fn) => fn()); };
   }, [opts.takeScreenshot, pressButton, disconnect, opts.setThemePref, opts.setShowSettings]);
 
+  useEffect(() => {
+    if (!opts.perfOverlay) {
+      setPerfStats(null);
+      return;
+    }
+    perfCounters.current = emptyCounters();
+    let last = performance.now();
+    const timer = setInterval(() => {
+      if (nativeActiveRef.current) return;
+      const now = performance.now();
+      const secs = (now - last) / 1000;
+      last = now;
+      const c = perfCounters.current;
+      perfCounters.current = emptyCounters();
+      const stats: PerfStats = {
+        renderFps: Math.round(c.rendered / secs),
+        decodeFps: Math.round(c.decoded / secs),
+        packetsPerSec: Math.round(c.packets / secs),
+        dropped: c.dropped,
+        bitrateKbps: Math.round((c.bytes * 8) / secs / 1000),
+        decodeMs: c.decodeSamples ? c.decodeMsTotal / c.decodeSamples : 0,
+        pipelineMs: c.pipelineSamples ? c.pipelineMsTotal / c.pipelineSamples : 0,
+        deviceLagMs: c.packets ? c.lagMsTotal / c.packets : 0,
+        deviceLagMaxMs: c.lagMsMax,
+        screenMs: c.screenSamples ? c.screenMsTotal / c.screenSamples : 0,
+        screenMaxMs: c.screenMsMax,
+        decodeQueue: decoderRef.current?.decodeQueueSize ?? 0,
+        width: canvasRef.current?.width ?? 0,
+        height: canvasRef.current?.height ?? 0,
+        codec: codecRef.current,
+      };
+      setPerfStats(stats);
+      if (c.packets > 0) invoke("log_perf", { stats }).catch(() => { });
+    }, PERF_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [opts.perfOverlay]);
+
   return {
     screen,
     connectedDevice,
     connectingSerial,
     deviceSize,
+    streamReady,
+    perfStats,
+    nativeActive,
     canvasRef,
+    frameDrawnRef,
     decoderRef,
     isMouseDownRef,
     muted,

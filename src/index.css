@@ -190,3 +190,16 @@
     animation: scan 1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
   }
 }
+
+html.native-video,
+html.native-video body {
+  background: transparent;
+}
+
+.native-video-frame {
+  box-shadow: 0 0 0 100vmax var(--background);
+}
+
+.native-video-hole {
+  box-shadow: 0 0 0 100vmax var(--canvas-bg);
+}
