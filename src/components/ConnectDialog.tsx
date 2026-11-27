@@ -66,9 +66,18 @@ export function rememberAddress(name: string, address: string) {
   localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
 }
 
+const HAS_PORT = /^(\[[^\]]+\]|[^:[\]]+):\d+$/;
+
+/** The host of `192.168.1.24:5555` or `[fe80::1]:5555`, brackets kept for IPv6. */
+function hostOf(address: string) {
+  const trimmed = address.trim();
+  const bracketed = trimmed.match(/^\[[^\]]+\]/);
+  return bracketed ? bracketed[0] : trimmed.split(":")[0];
+}
+
 function withPort(address: string, port: number) {
   const trimmed = address.trim();
-  return trimmed.includes(":") ? trimmed : `${trimmed}:${port}`;
+  return HAS_PORT.test(trimmed) ? trimmed : `${trimmed}:${port}`;
 }
 
 function peerPath(peer: TailnetPeer) {
@@ -118,7 +127,7 @@ export function ConnectDialog({ open, onOpenChange, peers, wifiPort, onConnected
         setQr(pairing);
         const paired = await invoke<QrPaired>("qr_pair_wait", { name: pairing.name, password: pairing.password });
         if (!live) return;
-        if (/^[\d.]+:\d+$/.test(paired.serial)) rememberAddress(paired.host, paired.serial);
+        if (HAS_PORT.test(paired.serial)) rememberAddress(paired.host, paired.serial);
         const { onConnected, onOpenChange, showToast } = callbacks.current;
         showToast("Paired with the phone", "success");
         onConnected(paired.serial, paired.host);
@@ -153,9 +162,16 @@ export function ConnectDialog({ open, onOpenChange, peers, wifiPort, onConnected
         await connectTo(target, recents.find((r) => r.address === target)?.name ?? target);
       } else if (tab === "pair") {
         await invoke("adb_pair", { address: pairAddress.trim(), code: pairCode });
-        const host = pairAddress.trim().split(":")[0];
+        const host = hostOf(pairAddress);
         showToast("Paired with the phone", "success", { detail: "Now connecting over Wi-Fi" });
-        await connectTo(withPort(host, wifiPort), host);
+        const paired = await invoke<QrPaired>("connect_paired", { host }).catch(() => null);
+        if (paired) {
+          if (HAS_PORT.test(paired.serial)) rememberAddress(paired.host, paired.serial);
+          onConnected(paired.serial, paired.host);
+          onOpenChange(false);
+        } else {
+          await connectTo(withPort(host, wifiPort), host);
+        }
       } else {
         const chosen = peers?.find((p) => p.address === peer);
         if (chosen) await connectTo(chosen.address, chosen.name);

@@ -905,17 +905,28 @@ pub struct QrPaired {
     host: String,
 }
 
+/// Clears the pairing session only if it is still `name`, in one step, so a wait that finishes
+/// cannot clear a newer code the user just made.
+fn qr_pair_cancel_if(name: &str) {
+    if let Ok(mut session) = QR_SESSION.lock() {
+        if session.as_deref() == Some(name) {
+            *session = None;
+        }
+    }
+}
+
 /// Waits for the phone that scanned the code, pairs with it and connects.
 #[tauri::command]
 pub async fn qr_pair_wait(name: String, password: String) -> Result<QrPaired, String> {
     let result = qr_pair(&name, &password).await;
-    if qr_session_is(&name) {
-        qr_pair_cancel();
-    }
+    qr_pair_cancel_if(&name);
     result
 }
 
 async fn qr_pair(name: &str, password: &str) -> Result<QrPaired, String> {
+    if !adb::mdns_available().await {
+        return Err("This computer cannot find phones on Wi-Fi. Restart Another, or use a pairing code".to_string());
+    }
     let deadline = std::time::Instant::now() + QR_SCAN_TIMEOUT;
     let pairing = loop {
         if !qr_session_is(name) {
@@ -941,32 +952,51 @@ async fn qr_pair(name: &str, password: &str) -> Result<QrPaired, String> {
         .await
         .map(|devices| devices.into_iter().map(|d| d.serial).collect())
         .unwrap_or_default();
-    adb::pair(&pairing.address, password).await.map_err(|e| e.to_string())?;
+    adb::pair(&pairing.address, password).await.map_err(|e| {
+        eprintln!("[qr-pair] pairing failed: {}", e);
+        "Pairing did not finish. Make a new code and scan it again".to_string()
+    })?;
+    connect_after_pair(pairing.host(), Some(&known), || qr_session_is(name)).await
+}
 
-    let host = pairing.host().to_string();
+fn serial_host(serial: &str) -> Option<&str> {
+    serial.rsplit_once(':').map(|(host, _)| host)
+}
+
+/// Waits for a phone just paired at `host` to connect, connecting to its Wireless debugging port
+/// when adb does not do it by itself. Only that phone counts: a serial at exactly `host`, or one
+/// named after the connect service the phone advertises. With `known`, phones listed before
+/// pairing are skipped.
+async fn connect_after_pair(
+    host: &str,
+    known: Option<&std::collections::HashSet<String>>,
+    wanted: impl Fn() -> bool,
+) -> Result<QrPaired, String> {
     let deadline = std::time::Instant::now() + QR_CONNECT_TIMEOUT;
     loop {
-        if !qr_session_is(name) {
+        if !wanted() {
             return Err("Cancelled".to_string());
         }
+        let services: Vec<adb::MdnsService> = adb::mdns_services()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.kind == adb::CONNECT_SERVICE && s.host() == host)
+            .collect();
         if let Ok(devices) = adb::list_devices().await {
             let joined = devices.into_iter().find(|d| {
                 d.state == "device"
-                    && !known.contains(&d.serial)
-                    && (d.serial.starts_with(&host) || d.serial.contains(adb::CONNECT_SERVICE))
+                    && known.is_none_or(|known| !known.contains(&d.serial))
+                    && (serial_host(&d.serial) == Some(host)
+                        || services.iter().any(|s| d.serial.starts_with(&format!("{}.", s.name))))
             });
             if let Some(device) = joined {
-                return Ok(QrPaired { serial: device.serial, host });
+                return Ok(QrPaired { serial: device.serial, host: host.to_string() });
             }
         }
-        if let Ok(services) = adb::mdns_services().await {
-            let connect = services
-                .into_iter()
-                .find(|s| s.kind == adb::CONNECT_SERVICE && s.host() == host);
-            if let Some(service) = connect {
-                if adb::connect_device(&service.address).await.is_ok() {
-                    return Ok(QrPaired { serial: service.address, host });
-                }
+        for service in &services {
+            if adb::connect_device(&service.address).await.is_ok() {
+                return Ok(QrPaired { serial: service.address.clone(), host: host.to_string() });
             }
         }
         if std::time::Instant::now() >= deadline {
@@ -974,6 +1004,13 @@ async fn qr_pair(name: &str, password: &str) -> Result<QrPaired, String> {
         }
         tokio::time::sleep(QR_POLL).await;
     }
+}
+
+/// Connects to a phone just paired with a pairing code. Wireless debugging listens on a random
+/// port, which the phone advertises over mDNS; it is not the pairing port.
+#[tauri::command]
+pub async fn connect_paired(host: String) -> Result<QrPaired, String> {
+    connect_after_pair(&host, None, || true).await
 }
 
 #[tauri::command]

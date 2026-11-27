@@ -289,6 +289,7 @@ pub fn run() {
             commands::qr_pair_start,
             commands::qr_pair_wait,
             commands::qr_pair_cancel,
+            commands::connect_paired,
             commands::phone_notifications,
             commands::app_icons,
             commands::notify_phone,

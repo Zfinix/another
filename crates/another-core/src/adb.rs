@@ -314,21 +314,35 @@ pub fn pairing_qr_payload(name: &str, password: &str) -> String {
     format!("WIFI:T:ADB;S:{};P:{};;", name, password)
 }
 
-/// Parses `adb mdns services`: one `name  type  host:port` line per service.
+/// Parses `adb mdns services`: one `name  type  host:port` line per service, separated by tabs.
+/// Names can contain spaces, such as the " (2)" Bonjour adds after a name clash.
 pub fn parse_mdns_services(output: &str) -> Vec<MdnsService> {
     output
         .lines()
         .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let (name, kind, address) = (parts.next()?, parts.next()?, parts.next()?);
-            let kind = kind.trim_end_matches('.');
-            kind.starts_with("_adb").then(|| MdnsService {
-                name: name.to_string(),
+            let mut parts: Vec<&str> = if line.contains('\t') {
+                line.split('\t').map(str::trim).filter(|part| !part.is_empty()).collect()
+            } else {
+                line.split_whitespace().collect()
+            };
+            let address = parts.pop()?;
+            let kind = parts.pop()?.trim_end_matches('.');
+            let name = parts.join(" ");
+            (!name.is_empty() && kind.starts_with("_adb")).then(|| MdnsService {
+                name,
                 kind: kind.to_string(),
                 address: address.to_string(),
             })
         })
         .collect()
+}
+
+/// Whether adb can discover phones on the network. On Linux and Windows that needs the adb server
+/// to have started with its own mDNS backend, which Another turns on when it starts the server.
+pub async fn mdns_available() -> bool {
+    run_adb_text(&["mdns", "check"])
+        .await
+        .is_ok_and(|output| output.contains("mdns daemon version"))
 }
 
 pub async fn mdns_services() -> Result<Vec<MdnsService>> {
@@ -710,6 +724,14 @@ mod tests {
         assert_eq!(services[1].kind, PAIRING_SERVICE);
         assert_eq!(services[1].name, "another-Qh9c2x");
         assert_eq!(services[1].host(), "192.168.1.10");
+    }
+
+    #[test]
+    fn mdns_names_may_contain_spaces() {
+        let services = parse_mdns_services("adb-2B1A0BCC-kXlYVe (2)\t_adb-tls-connect._tcp\t192.168.1.10:41335\n");
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name, "adb-2B1A0BCC-kXlYVe (2)");
+        assert_eq!(services[0].kind, CONNECT_SERVICE);
     }
 
     #[test]
