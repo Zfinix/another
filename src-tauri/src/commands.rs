@@ -982,6 +982,62 @@ pub async fn device_info(serial: String) -> Result<adb::DeviceInfo, String> {
     adb::device_info(&serial).await.map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+pub struct FailedFile {
+    pub name: String,
+    pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct SentFiles {
+    pub installed: Vec<String>,
+    pub pushed: Vec<String>,
+    pub failed: Vec<FailedFile>,
+}
+
+fn display_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn send_files(serial: String, paths: Vec<String>) -> Result<SentFiles, String> {
+    let (apks, files): (Vec<String>, Vec<String>) = paths
+        .into_iter()
+        .partition(|p| p.to_ascii_lowercase().ends_with(".apk") && std::path::Path::new(p).is_file());
+
+    let installs = async {
+        let mut installed = Vec::new();
+        let mut failed = Vec::new();
+        for apk in &apks {
+            match adb::install_apk(&serial, apk).await {
+                Ok(()) => installed.push(display_name(apk)),
+                Err(e) => failed.push(FailedFile { name: display_name(apk), error: e.to_string() }),
+            }
+        }
+        (installed, failed)
+    };
+    let push = async {
+        if files.is_empty() {
+            return Ok(());
+        }
+        adb::push_to_downloads(&serial, &files).await
+    };
+    let ((installed, mut failed), pushed) = tokio::join!(installs, push);
+
+    let names: Vec<String> = files.iter().map(|f| display_name(f)).collect();
+    let pushed = match pushed {
+        Ok(()) => names,
+        Err(e) => {
+            let error = e.to_string();
+            failed.extend(names.into_iter().map(|name| FailedFile { name, error: error.clone() }));
+            Vec::new()
+        }
+    };
+    Ok(SentFiles { installed, pushed, failed })
+}
+
 #[tauri::command]
 pub async fn device_facts(serial: String) -> Result<adb::DeviceFacts, String> {
     adb::device_facts(&serial).await.map_err(|e| e.to_string())

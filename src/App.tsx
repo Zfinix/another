@@ -23,6 +23,7 @@ import { useDeviceFacts } from "./hooks/useDeviceFacts";
 import { useProfiles, sanitizeProfile } from "./hooks/useProfiles";
 import { useUpdater } from "./hooks/useUpdater";
 import { useWindowDrag } from "./hooks/useWindowDrag";
+import { useFileDrop } from "./hooks/useFileDrop";
 import { Sidebar, type DeviceActions } from "./components/Sidebar";
 import { DeviceView } from "./components/DeviceView";
 import { EmptyState, TrustState, StartingState, DisconnectedState, type StartStep } from "./components/StateViews";
@@ -800,6 +801,7 @@ function App() {
   };
 
   const mirrorTarget = connectedDevice;
+  const fileDrop = useFileDrop(screen === "another" && mirrorTarget ? mirrorTarget.serial : null, showToast);
   const usbTwin = mirrorTarget && isNetworkSerial(mirrorTarget.serial) ? devices.find((d) => d.model === mirrorTarget.model && !isNetworkSerial(d.serial)) : null;
 
   return (
@@ -821,6 +823,7 @@ function App() {
           recording={connection.recording}
           muted={connection.muted}
           macroRecording={macro.macroRecording}
+          fileDrop={fileDrop}
           pins={pins}
           onTogglePin={togglePin}
           macros={macro.macros.map((m) => m.name)}

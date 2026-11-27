@@ -206,6 +206,7 @@ pub fn run() {
             commands::install_cli,
             commands::device_info,
             commands::device_facts,
+            commands::send_files,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

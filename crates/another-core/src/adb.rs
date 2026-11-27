@@ -147,6 +147,40 @@ pub async fn push_file(serial: &str, local: &str, remote: &str) -> Result<()> {
     Ok(())
 }
 
+pub const DOWNLOADS_DIR: &str = "/sdcard/Download/";
+
+pub async fn install_apk(serial: &str, path: &str) -> Result<()> {
+    run_adb(&["-s", serial, "install", "-r", "-t", path]).await.map_err(|e| {
+        let msg = e.to_string();
+        match msg.find("Failure [") {
+            Some(at) => anyhow!("{}", msg[at..].trim_end()),
+            None => e,
+        }
+    })?;
+    Ok(())
+}
+
+/// Pushes every path in one adb call, then asks the media scanner to index them so they show up in Files and Photos.
+pub async fn push_to_downloads(serial: &str, paths: &[String]) -> Result<()> {
+    let mut args = vec!["-s", serial, "push"];
+    args.extend(paths.iter().map(String::as_str));
+    args.push(DOWNLOADS_DIR);
+    run_adb(&args).await?;
+
+    let scans: Vec<String> = paths
+        .iter()
+        .filter_map(|p| std::path::Path::new(p).file_name()?.to_str())
+        .map(|name| {
+            let uri = format!("file://{DOWNLOADS_DIR}{name}").replace('\'', "'\\''");
+            format!("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d '{uri}' >/dev/null")
+        })
+        .collect();
+    if !scans.is_empty() {
+        let _ = run_adb(&["-s", serial, "shell", &scans.join("; ")]).await;
+    }
+    Ok(())
+}
+
 pub async fn forward_port(serial: &str, local_port: u16, remote: &str) -> Result<()> {
     run_adb(&[
         "-s",
