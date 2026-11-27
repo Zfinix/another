@@ -199,6 +199,9 @@ pub fn run() {
             commands::read_text_file,
             commands::device_screenshot,
             commands::adb_pair,
+            commands::qr_pair_start,
+            commands::qr_pair_wait,
+            commands::qr_pair_cancel,
             commands::phone_notifications,
             commands::open_phone_app,
             commands::set_stay_on,
@@ -208,6 +211,7 @@ pub fn run() {
             commands::install_cli,
             commands::set_window_blur,
             commands::device_info,
+            commands::device_facts,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

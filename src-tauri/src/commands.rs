@@ -80,14 +80,14 @@ pub async fn connect_device(
     let (streams, mut server_process) =
         scrcpy::start_server(&serial, &server_path_str, port, &settings)
             .await
-            .map_err(|e| format!("Failed to start scrcpy server: {}", e))?;
+            .map_err(|e| format!("Could not start mirroring: {}", e))?;
 
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let control_socket = Arc::new(Mutex::new(streams.control_socket));
 
     let audio_handle = if let Some(audio_socket) = streams.audio_socket {
         let handle = AudioHandle::new()
-            .map_err(|e| format!("Failed to init audio: {}", e))?;
+            .map_err(|e| format!("Could not play the phone audio: {}", e))?;
         let handle = Arc::new(handle);
         let audio_shutdown = shutdown.clone();
         let audio_ref = handle.clone();
@@ -623,7 +623,7 @@ pub async fn wifi_enable(serial: String, port: Option<u16>) -> Result<String, St
     }
 
     if !connected {
-        return Err(format!("Could not connect to {} -- make sure both devices are on the same WiFi network", addr));
+        return Err(format!("Could not connect to {}. Make sure the phone and this computer are on the same Wi-Fi", addr));
     }
 
     Ok(addr)
@@ -778,6 +778,148 @@ pub async fn adb_pair(address: String, code: String) -> Result<(), String> {
     adb::pair(&address, &code).await.map_err(|e| e.to_string())
 }
 
+const QR_NAME_PREFIX: &str = "another-";
+const QR_NAME_LEN: usize = 8;
+const QR_PASSWORD_LEN: usize = 12;
+/// No 0/O or 1/l/I, so the values stay readable in logs.
+const QR_ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const QR_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const QR_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const QR_POLL: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// The pairing name of the QR code on screen. Cleared when the dialog closes, which stops the wait.
+static QR_SESSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[derive(Serialize)]
+pub struct QrPairing {
+    name: String,
+    password: String,
+    size: usize,
+    modules: Vec<bool>,
+}
+
+fn random_text(len: usize) -> Result<String, String> {
+    let mut bytes = vec![0u8; len];
+    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes
+        .iter()
+        .map(|b| QR_ALPHABET[*b as usize % QR_ALPHABET.len()] as char)
+        .collect())
+}
+
+fn qr_session_is(name: &str) -> bool {
+    QR_SESSION
+        .lock()
+        .map(|session| session.as_deref() == Some(name))
+        .unwrap_or(false)
+}
+
+/// Makes a new pairing code for Wireless debugging, Pair device with QR code.
+#[tauri::command]
+pub fn qr_pair_start() -> Result<QrPairing, String> {
+    let name = format!("{}{}", QR_NAME_PREFIX, random_text(QR_NAME_LEN)?);
+    let password = random_text(QR_PASSWORD_LEN)?;
+    let code = qrcode::QrCode::new(adb::pairing_qr_payload(&name, &password)).map_err(|e| e.to_string())?;
+    let modules = code
+        .to_colors()
+        .into_iter()
+        .map(|color| color == qrcode::Color::Dark)
+        .collect();
+    if let Ok(mut session) = QR_SESSION.lock() {
+        *session = Some(name.clone());
+    }
+    Ok(QrPairing {
+        name,
+        password,
+        size: code.width(),
+        modules,
+    })
+}
+
+#[tauri::command]
+pub fn qr_pair_cancel() {
+    if let Ok(mut session) = QR_SESSION.lock() {
+        *session = None;
+    }
+}
+
+#[derive(Serialize)]
+pub struct QrPaired {
+    serial: String,
+    host: String,
+}
+
+/// Waits for the phone that scanned the code, pairs with it and connects.
+#[tauri::command]
+pub async fn qr_pair_wait(name: String, password: String) -> Result<QrPaired, String> {
+    let result = qr_pair(&name, &password).await;
+    if qr_session_is(&name) {
+        qr_pair_cancel();
+    }
+    result
+}
+
+async fn qr_pair(name: &str, password: &str) -> Result<QrPaired, String> {
+    let deadline = std::time::Instant::now() + QR_SCAN_TIMEOUT;
+    let pairing = loop {
+        if !qr_session_is(name) {
+            return Err("Cancelled".to_string());
+        }
+        let services = adb::mdns_services().await.map_err(|e| {
+            eprintln!("[qr-pair] mdns services failed: {}", e);
+            "This computer cannot find phones on Wi-Fi. Use a pairing code instead".to_string()
+        })?;
+        if let Some(service) = services
+            .into_iter()
+            .find(|s| s.kind == adb::PAIRING_SERVICE && s.name == name)
+        {
+            break service;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("The code expired. Make a new one and scan it again".to_string());
+        }
+        tokio::time::sleep(QR_POLL).await;
+    };
+
+    let known: std::collections::HashSet<String> = adb::list_devices()
+        .await
+        .map(|devices| devices.into_iter().map(|d| d.serial).collect())
+        .unwrap_or_default();
+    adb::pair(&pairing.address, password).await.map_err(|e| e.to_string())?;
+
+    let host = pairing.host().to_string();
+    let deadline = std::time::Instant::now() + QR_CONNECT_TIMEOUT;
+    loop {
+        if !qr_session_is(name) {
+            return Err("Cancelled".to_string());
+        }
+        if let Ok(devices) = adb::list_devices().await {
+            let joined = devices.into_iter().find(|d| {
+                d.state == "device"
+                    && !known.contains(&d.serial)
+                    && (d.serial.starts_with(&host) || d.serial.contains(adb::CONNECT_SERVICE))
+            });
+            if let Some(device) = joined {
+                return Ok(QrPaired { serial: device.serial, host });
+            }
+        }
+        if let Ok(services) = adb::mdns_services().await {
+            let connect = services
+                .into_iter()
+                .find(|s| s.kind == adb::CONNECT_SERVICE && s.host() == host);
+            if let Some(service) = connect {
+                if adb::connect_device(&service.address).await.is_ok() {
+                    return Ok(QrPaired { serial: service.address, host });
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("Paired, but the phone did not connect. Turn Wireless debugging off and on, then try again".to_string());
+        }
+        tokio::time::sleep(QR_POLL).await;
+    }
+}
+
 #[tauri::command]
 pub async fn phone_notifications(
     serial: String,
@@ -838,6 +980,11 @@ pub async fn delete_file(path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn device_info(serial: String) -> Result<adb::DeviceInfo, String> {
     adb::device_info(&serial).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn device_facts(serial: String) -> Result<adb::DeviceFacts, String> {
+    adb::device_facts(&serial).await.map_err(|e| e.to_string())
 }
 
 const CLI_NAME: &str = "another-cli";
