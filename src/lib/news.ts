@@ -14,6 +14,7 @@ export type NewsArt =
 export type NewsAction =
   | { kind: "view"; label: string; view: View }
   | { kind: "settings"; label: string; pane: "general" | "network" | "stream" }
+  | { kind: "connect"; label: string }
   | { kind: "none" };
 
 export type HeroPattern = "silk" | "topo" | "prism";
@@ -31,6 +32,14 @@ const same = (src: string) => ({ light: src, dark: src });
 
 /** Newest first; the card opens on the first one. */
 export const NEWS: [News, ...News[]] = [
+  {
+    id: "qr-pairing",
+    title: "Pair with a QR code",
+    hero: { pattern: "prism", colors: ["#22c55e", "#14b8a6", "#3b82f6"], dark: ["#16a34a", "#0ea5e9", "#84cc16"] },
+    body: "Scan a code from Wireless debugging on the phone and Another pairs and connects over Wi-Fi. No IP address, port or six-digit code to type.",
+    art: { kind: "tiles", tiles: [{ icon: "qrOn", tone: "g-green" }, { icon: "wifiOn", tone: "g-blue" }] },
+    action: { kind: "connect", label: "Pair a phone" },
+  },
   {
     id: "ai-agents",
     title: "Let AI drive your phone",

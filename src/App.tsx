@@ -604,6 +604,7 @@ function App() {
     closeNews();
     if (item.action.kind === "view") setView(item.action.view);
     if (item.action.kind === "settings") openSettings(item.action.pane);
+    if (item.action.kind === "connect") setShowConnect(true);
   };
 
   const rotate = () => { invoke("rotate_device").catch((e) => showToast("Could not rotate the screen", "error", { detail: `${e}` })); };
@@ -629,7 +630,7 @@ function App() {
     { id: "disconnect", label: "Disconnect", icon: "unplug", keys: [MOD, "D"], key: "d", section: "Phone", hidden: !connectedDevice, action: disconnect },
     { id: "cmdbar", label: "Command bar", icon: "search", keys: [MOD, "K"], key: "k", section: "App", action: () => setShowCommandBar((s) => !s) },
     { id: "settings", label: "Settings", icon: "settings", keys: [MOD, ","], key: ",", section: "App", action: () => openSettings() },
-    { id: "connect", label: "Connect by address", icon: "add", keys: [], section: "App", action: () => setShowConnect(true) },
+    { id: "connect", label: "Connect a phone", icon: "qr", keywords: "qr code pair wifi address", keys: [], section: "App", action: () => setShowConnect(true) },
     { id: "whats-new", label: "What's new", icon: "sparkle", keys: [], section: "App", action: () => setShowNews(true) },
     { id: "refresh", label: "Refresh devices", icon: "refresh", keys: [], section: "App", action: () => { refreshDevices(); tailnet.refresh(); } },
     { id: "theme", label: "Change the theme", icon: "sun", keys: [MOD, "T"], key: "t", section: "App", action: cycleTheme },

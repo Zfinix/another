@@ -26,7 +26,7 @@ export function EmptyState({ onConnectByAddress }: { onConnectByAddress: () => v
         <div className="row"><span>Turn on USB debugging</span><span className="value">2</span></div>
         <div className="row"><span>Tap Allow on the phone</span><span className="value">3</span></div>
       </div>
-      <button type="button" className="button button--primary self-start" onClick={onConnectByAddress}>Connect by address</button>
+      <button type="button" className="button button--primary self-start" onClick={onConnectByAddress}>Pair over Wi-Fi</button>
     </Panel>
   );
 }

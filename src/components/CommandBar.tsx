@@ -11,6 +11,8 @@ export interface CommandDef {
   section: string;
   icon: IconName;
   meta?: string;
+  /** Extra words the search matches but the row does not show. */
+  keywords?: string;
   hidden?: boolean;
   action: () => void;
 }
@@ -61,7 +63,7 @@ export function CommandBar({ open, onOpenChange, commands }: CommandBarProps) {
                 .map((c) => (
                   <Command.Item
                     key={c.id}
-                    value={`${c.label} ${c.section}`}
+                    value={`${c.label} ${c.section} ${c.keywords ?? ""}`}
                     className="item cmd-item"
                     onSelect={() => {
                       onOpenChange(false);
