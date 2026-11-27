@@ -12,7 +12,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(40);
 const POLL: Duration = Duration::from_millis(400);
 
 #[derive(Parser)]
-#[command(name = "another-cli", version, about = "Drive the Another app from the terminal")]
+#[command(name = "another", bin_name = "another", version, about = "Drive the Another app from the terminal")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -97,7 +97,7 @@ enum ProfileCommand {
 
 fn main() {
     if let Err(e) = run(Cli::parse()) {
-        eprintln!("another-cli: {:#}", e);
+        eprintln!("another: {:#}", e);
         std::process::exit(1);
     }
 }
