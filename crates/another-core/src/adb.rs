@@ -386,17 +386,20 @@ pub struct DeviceInfo {
     pub model: String,
     pub market_name: String,
     pub android_version: String,
+    /// The phone's own serial number, the same over USB and Wi-Fi.
+    pub hardware_serial: String,
     pub avd_name: String,
     pub avd_device: String,
     pub avd_manufacturer: String,
 }
 
-const INFO_PROPS: [&str; 5] = [
+const INFO_PROPS: [&str; 6] = [
     "ro.product.manufacturer",
     "ro.product.model",
     "ro.product.marketname",
     "ro.product.vendor.marketname",
     "ro.build.version.release",
+    "ro.serialno",
 ];
 
 const KEYCODE_WAKEUP: &str = "224";
@@ -453,6 +456,7 @@ pub async fn device_info(serial: &str) -> Result<DeviceInfo> {
         model,
         market_name: if market_name.is_empty() { vendor_market_name } else { market_name },
         android_version: next(),
+        hardware_serial: next(),
         ..DeviceInfo::default()
     };
     if serial.starts_with("emulator-") {

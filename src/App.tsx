@@ -159,11 +159,14 @@ function App() {
 
   const activeMirror = activeSerial ? mirrors[activeSerial] ?? null : null;
 
-  const sendToMirror = useCallback((serial: string, command: MirrorCommand) => {
-    const label = mirrorLabel(serial);
-    emitTo(label, MIRROR_COMMAND_EVENT, command).catch(() => { });
-    Window.getByLabel(label).then((win) => win?.setFocus()).catch(() => { });
+  const focusMirror = useCallback((serial: string) => {
+    Window.getByLabel(mirrorLabel(serial)).then((win) => win?.setFocus()).catch(() => { });
   }, []);
+
+  const sendToMirror = useCallback((serial: string, command: MirrorCommand) => {
+    emitTo(mirrorLabel(serial), MIRROR_COMMAND_EVENT, command).catch(() => { });
+    focusMirror(serial);
+  }, [focusMirror]);
 
   useEffect(() => {
     const window = getCurrentWebviewWindow();
@@ -255,10 +258,23 @@ function App() {
     store("stream_settings", JSON.stringify(next));
   };
 
+  const mirrorsRef = useRef(mirrors);
+  mirrorsRef.current = mirrors;
+
+  /** Opens a phone's window. A phone on USB and Wi-Fi is one phone, so its other window is shown instead of a second one. */
   const openMirrorFor = useCallback((device: Device) => {
+    const hardware = getDeviceInfo(device.serial)?.hardware_serial;
+    const twin = hardware
+      ? Object.keys(mirrorsRef.current).find((serial) => serial !== device.serial && getDeviceInfo(serial)?.hardware_serial === hardware)
+      : undefined;
+    if (twin) {
+      focusMirror(twin);
+      showToast(`${deviceName(device)} is already mirroring`, "info", { detail: "Close that window to switch connections" });
+      return;
+    }
     openMirror({ serial: device.serial, title: deviceName(device), model: device.model, brand: deviceMaker(device), path: pathLabelRef.current(device) })
       .catch((e) => showToast(`Could not open ${deviceName(device)}`, "error", { detail: `${e}` }));
-  }, [showToast]);
+  }, [showToast, focusMirror]);
 
   const connectBySerial = (serial: string) => {
     const device = devicesRef.current.find((d) => d.serial === serial) ?? { serial, model: serial, state: "device" };

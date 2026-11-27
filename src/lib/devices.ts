@@ -19,6 +19,8 @@ export interface DeviceInfo {
   model: string;
   market_name: string;
   android_version: string;
+  /** The phone's own serial number, the same over USB and Wi-Fi. */
+  hardware_serial?: string;
   avd_name: string;
   avd_device: string;
   avd_manufacturer: string;
