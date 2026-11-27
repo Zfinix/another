@@ -1,61 +1,60 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import type React from "react";
-import {
-  Cog6ToothIcon,
-  CameraIcon,
-  ChevronLeftIcon,
-  XMarkIcon,
-  HomeIcon,
-  Square2StackIcon,
-  CommandLineIcon,
-  StopIcon,
-  VideoCameraIcon,
-  SpeakerWaveIcon,
-  SpeakerXMarkIcon,
-  PowerIcon,
-  ArrowPathIcon,
-} from "@heroicons/react/24/outline";
-import type { Device } from "../types";
-import { getDeviceDisplayName, type QuickActionId } from "../types";
-import { Button } from "@/components/ui/button";
+import { invoke } from "@tauri-apps/api/core";
+import { Icon } from "@/components/Icon";
+import { Menu, MenuPopup, MenuItem, MenuSeparator, MenuSubmenu } from "@/components/ui/menu";
+import { StartingState, type StartStep } from "@/components/StateViews";
+import type { IconName } from "@/lib/icons";
+import type { PerfStats, QuickActionId } from "../types";
+import { QUICK_ACTION_ORDER } from "../types";
 
-const QUICK_ACTION_ICONS: Record<QuickActionId, (props: { muted?: boolean; recording?: boolean; macroRecording?: boolean }) => React.ReactNode> = {
-  record: ({ recording }) => recording ? <StopIcon className="text-[#f44]" /> : <VideoCameraIcon />,
-  mute: ({ muted }) => muted ? <SpeakerXMarkIcon /> : <SpeakerWaveIcon />,
-  volume_up: () => <span className="text-[11px] font-bold">V+</span>,
-  volume_down: () => <span className="text-[11px] font-bold">V-</span>,
-  power: () => <PowerIcon />,
-  "macro-toggle": ({ macroRecording }) => macroRecording ? <StopIcon className="text-[#f90]" /> : (
-    <svg width="15" height="15" viewBox="0 0 24 25" fill="none" className="text-current">
-      <path d="M11.41 2.068c-.57 0-1.08 0-1.55.17-.1.04-.19.08-.29.12-.46.22-.81.58-1.21.98L3.58 8.148c-.47.47-.88.88-1.11 1.43-.22.54-.22 1.13-.22 1.8v3.47c0 1.78 0 3.22.15 4.35.16 1.17.49 2.16 1.27 2.95.78.78 1.76 1.12 2.93 1.28 1.12.15 2.55.15 4.33.15s3.31 0 4.43-.15c-.49-1.1-1.51-2.09-2.61-2.52-1.66-.65-1.66-3.01 0-3.66 1.16-.46 2.22-1.52 2.67-2.67.66-1.66 3.01-1.66 3.66 0 .16.41.39.81.67 1.17V14.858c0-1.53 0-2.77-.11-3.75-.12-1.02-.37-1.89-.96-2.63-.22-.27-.46-.52-.73-.74-.73-.6-1.6-.85-2.61-.97-1.18-.11-2.4-.11-3.92-.11z" fill="currentColor" opacity="0.5"/>
-      <path fillRule="evenodd" clipRule="evenodd" d="M9.569 2.358c.09-.05.19-.09.29-.12.21-.07.42-.12.65-.14v1.99c0 1.36 0 2.01-.12 2.88-.12.9-.38 1.66-.98 2.26s-1.36.86-2.26.98c-.87.12-1.52.12-2.88.12H2.289c.03-.26.09-.51.18-.75.22-.54.64-.96 1.11-1.43l4.78-4.81c.4-.4.76-.77 1.21-.98zM17.919 23.118c-.24.61-1.09.61-1.33 0l-.04-.1a5.73 5.73 0 00-3.23-3.23l-.11-.04c-.6-.24-.6-1.1 0-1.33l.11-.04a5.73 5.73 0 003.23-3.23l.04-.1c.24-.61 1.09-.61 1.33 0l.04.1a5.73 5.73 0 003.23 3.23l.11.04c.6.24.6 1.1 0 1.33l-.11.04a5.73 5.73 0 00-3.23 3.23l-.04.1z" fill="currentColor"/>
-    </svg>
-  ),
-  rotate: () => <ArrowPathIcon />,
-};
+interface QuickAction {
+  label: string;
+  icon: IconName;
+  keys: string;
+  on?: boolean;
+  run: () => void;
+}
+
+export interface ReconnectingInfo {
+  message: string;
+  action?: { label: string; run: () => void };
+}
 
 interface MirrorScreenProps {
-  connectedDevice: Device;
-  connecting?: boolean;
+  name: string;
+  brand: string;
+  path: string;
+  streamReady: boolean;
+  steps: StartStep[];
   deviceSize: { width: number; height: number };
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   isMouseDownRef: React.MutableRefObject<boolean>;
+  nativeVideo: boolean;
+  latencyMs: number | null;
+  perfStats: PerfStats | null;
+  statsOn: boolean;
   recording: boolean;
   muted: boolean;
   macroRecording: boolean;
-  pinnedActions: QuickActionId[];
+  pins: QuickActionId[];
+  onTogglePin: (id: QuickActionId) => void;
+  macros: string[];
+  onRunMacro: (name: string) => void;
+  reconnecting: ReconnectingInfo | null;
+  adaptive: { tier: string; fps: number; lagMs: number } | null;
   alwaysOnTop: boolean;
-  adaptiveInfo?: { enabled: boolean; tierName: string; fps: number };
+  onToggleAlwaysOnTop: () => void;
+  onOpenSettings: () => void;
+  onToggleStats: () => void;
   onToggleRecording: () => void;
   onToggleMacroRecording: () => void;
-  onPressButton: (button: string) => void;
-  onTakeScreenshot: () => void;
-  onToggleSettings: () => void;
-  onOpenCommandBar: () => void;
-  onToggleAlwaysOnTop: () => void;
-  onDisconnect: () => void;
-  onRotate: () => void;
   onToggleMute: () => void;
+  onScreenshot: () => void;
+  onRotate: () => void;
+  onPressButton: (button: string) => void;
+  onOpenCommandBar: () => void;
+  onDisconnect: () => void;
   onCanvasMouseEvent: (e: React.MouseEvent<HTMLCanvasElement>, action: string) => void;
   onWheel: (e: React.WheelEvent<HTMLCanvasElement>) => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
@@ -63,201 +62,218 @@ interface MirrorScreenProps {
   onCompositionEnd: (e: React.CompositionEvent) => void;
 }
 
-function formatTime(seconds: number) {
-  const m = Math.floor(seconds / 60).toString().padStart(2, "0");
-  const s = (seconds % 60).toString().padStart(2, "0");
-  return `${m}:${s}`;
+function useElapsed(running: boolean) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    setSeconds(0);
+    if (!running) return;
+    const timer = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
+  return `${Math.floor(seconds / 60)}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
-/** Compact chrome toolbar hits (title bar); overrides default Button height and ghost hover fill. */
-const mirrorToolbarBtnClass =
-  "size-7 min-h-0 shrink-0 gap-0 rounded-md border-transparent p-0 shadow-none text-text-2 transition-all duration-100 hover:bg-transparent dark:hover:bg-transparent hover:text-foreground active:scale-[0.92] [&_svg]:!size-4";
+function RailButton({ icon, label, onClick }: { icon: IconName; label: string; onClick: () => void }) {
+  return (
+    <button type="button" className="icon-button" style={{ width: 32, height: 32 }} aria-label={label} title={label} onClick={onClick}>
+      <Icon name={icon} />
+    </button>
+  );
+}
 
-export function MirrorScreen({
-  connectedDevice,
-  connecting,
-  deviceSize,
-  canvasRef,
-  isMouseDownRef,
-  recording,
-  muted,
-  macroRecording,
-  pinnedActions,
-  alwaysOnTop,
-  adaptiveInfo,
-  onToggleRecording,
-  onToggleMacroRecording,
-  onPressButton,
-  onTakeScreenshot,
-  onToggleSettings,
-  onOpenCommandBar,
-  onToggleAlwaysOnTop,
-  onDisconnect,
-  onRotate,
-  onToggleMute,
-  onCanvasMouseEvent,
-  onWheel,
-  onKeyDown,
-  onCompositionStart,
-  onCompositionEnd,
-}: MirrorScreenProps) {
-  const quickActionHandlers: Record<QuickActionId, () => void> = {
-    record: onToggleRecording,
-    mute: onToggleMute,
-    volume_up: () => onPressButton("volume_up"),
-    volume_down: () => onPressButton("volume_down"),
-    power: () => onPressButton("power"),
-    "macro-toggle": onToggleMacroRecording,
-    rotate: onRotate,
-  };
+const RAIL_GAP = <span aria-hidden="true" style={{ width: 16, height: 1, margin: "4px 0", background: "var(--border)" }} />;
 
-  const quickActionTitles: Record<QuickActionId, string> = {
-    record: recording ? "Stop Recording" : "Record",
-    mute: muted ? "Unmute" : "Mute",
-    volume_up: "Volume Up",
-    volume_down: "Volume Down",
-    power: "Power",
-    "macro-toggle": macroRecording ? "Stop Macro" : "Record Macro",
-    rotate: "Rotate",
-  };
-  const [elapsed, setElapsed] = useState(0);
-  const [macroElapsed, setMacroElapsed] = useState(0);
-  const [shiftHeld, setShiftHeld] = useState(false);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const macroIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+export function MirrorScreen(props: MirrorScreenProps) {
+  const { name, streamReady, deviceSize, canvasRef, isMouseDownRef, nativeVideo, latencyMs, perfStats, statsOn, recording, muted, macroRecording, pins } = props;
+  const [moreOpen, setMoreOpen] = useState(false);
+  const recordTime = useElapsed(recording);
+  const macroTime = useElapsed(macroRecording);
+  const landscape = deviceSize.width > deviceSize.height;
 
   useEffect(() => {
-    const down = (e: KeyboardEvent) => { if (e.key === "Shift") setShiftHeld(true); };
-    const up = (e: KeyboardEvent) => { if (e.key === "Shift") setShiftHeld(false); };
-    const blur = () => setShiftHeld(false);
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    window.addEventListener("blur", blur);
-    return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
-      window.removeEventListener("blur", blur);
+    if (!nativeVideo) return;
+    const root = document.documentElement;
+    root.classList.add("native-video");
+    const report = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      invoke("set_native_video_frame", { x: rect.left, y: rect.top, width: rect.width, height: rect.height }).catch(() => { });
     };
-  }, []);
+    report();
+    const observer = new ResizeObserver(report);
+    if (canvasRef.current) observer.observe(canvasRef.current);
+    window.addEventListener("resize", report);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", report);
+      root.classList.remove("native-video");
+    };
+  }, [nativeVideo, canvasRef, deviceSize, streamReady]);
 
-  useEffect(() => {
-    if (recording) {
-      setElapsed(0);
-      intervalRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
-    } else {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [recording]);
+  const actions: Record<QuickActionId, QuickAction> = {
+    screenshot: { label: "Take a screenshot", icon: "shot", keys: "⇧⌘S", run: props.onScreenshot },
+    record: { label: recording ? "Stop recording" : "Start recording", icon: recording ? "recDot" : "record", keys: "⇧⌘R", on: recording, run: props.onToggleRecording },
+    stats: { label: statsOn ? "Hide stream stats" : "Show stream stats", icon: statsOn ? "statsOn" : "stats", keys: "⌘I", on: statsOn, run: props.onToggleStats },
+    mute: { label: muted ? "Unmute the phone" : "Mute the phone", icon: muted ? "speakerMute" : "mute", keys: "⌘M", on: muted, run: props.onToggleMute },
+    rotate: { label: "Rotate", icon: "rotate", keys: "⌘R", run: props.onRotate },
+  };
 
-  useEffect(() => {
-    if (macroRecording) {
-      setMacroElapsed(0);
-      macroIntervalRef.current = setInterval(() => setMacroElapsed((s) => s + 1), 1000);
-    } else {
-      if (macroIntervalRef.current) clearInterval(macroIntervalRef.current);
-      macroIntervalRef.current = null;
-    }
-    return () => { if (macroIntervalRef.current) clearInterval(macroIntervalRef.current); };
-  }, [macroRecording]);
+  const pinned = QUICK_ACTION_ORDER.filter((id) => pins.includes(id));
 
   return (
-    <div className="flex flex-col h-screen w-screen animate-in fade-in zoom-in-[0.98] duration-300">
-      <div className="h-9 shrink-0 flex items-center pl-[72px] pr-2 bg-surface/90 backdrop-blur-md drag-region" data-tauri-drag-region>
-        <div className="flex items-center gap-1.5 min-w-0 mr-auto drag-region" data-tauri-drag-region>
-          <span className="text-[11px] font-medium text-foreground truncate max-w-[120px] data-tauri-drag-region">{getDeviceDisplayName(connectedDevice)}</span>
+    <div className={`app-window flex-col ${nativeVideo ? "native" : ""}`}>
+      <div className="drag relative z-10 flex items-center gap-1 shrink-0" style={{ height: 36 }} data-tauri-drag-region>
+        <div className="flex-1 min-w-0 flex items-center gap-2" style={{ paddingLeft: 96 }} data-tauri-drag-region>
+          <span className="truncate" style={{ fontWeight: 500 }} data-tauri-drag-region>{name}</span>
+          {streamReady && latencyMs !== null && (
+            <span className="mono shrink-0" style={{ color: "var(--muted)" }} title="Capture to screen latency">{Math.round(latencyMs)} ms</span>
+          )}
+          {props.adaptive && streamReady && (
+            <span className="mono shrink-0 truncate" style={{ color: "var(--muted)" }} title="Adaptive quality">{props.adaptive.tier}</span>
+          )}
+          {recording && (
+            <span className="mono inline-flex items-center gap-2 shrink-0" style={{ color: "var(--rec)" }}>
+              <span className="dot" style={{ background: "currentColor" }} />{recordTime}
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-0.5 no-drag">
-          {shiftHeld
-            ? <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={() => onPressButton("back")} title="Back"><ChevronLeftIcon /></Button>
-            : <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={() => onPressButton("home")} title="Home"><HomeIcon /></Button>}
-          {shiftHeld
-            ? <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={() => onPressButton("power")} title="Power"><PowerIcon /></Button>
-            : <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={() => onPressButton("recents")} title="Recents"><Square2StackIcon /></Button>}
-        </div>
-        {pinnedActions.length > 0 && (
-          <>
-            <div className="w-px h-3.5 bg-border/30 mx-1" />
-            <div className="flex items-center gap-0.5 no-drag">
-              {pinnedActions.map((id) => (
-                <Button key={id} variant="ghost" className={mirrorToolbarBtnClass} onClick={quickActionHandlers[id]} title={quickActionTitles[id]}>
-                  {QUICK_ACTION_ICONS[id]({ muted, recording, macroRecording })}
-                </Button>
+        {pinned.map((id) => {
+          const a = actions[id];
+          return (
+            <button key={id} type="button" className={a.on && id === "stats" ? "icon-button on" : "icon-button"} aria-label={a.label} title={`${a.label} (${a.keys})`} style={id === "record" && recording ? { color: "var(--rec)" } : undefined} onClick={a.run}>
+              <Icon name={a.icon} />
+            </button>
+          );
+        })}
+        <Menu.Root open={moreOpen} onOpenChange={setMoreOpen}>
+          <Menu.Trigger className={moreOpen ? "icon-button on" : "icon-button"} aria-label="More actions" title="More actions">
+            <Icon name="more" />
+          </Menu.Trigger>
+          <MenuPopup width={280} align="end">
+            {QUICK_ACTION_ORDER.map((id) => {
+              const a = actions[id];
+              const isPinned = pins.includes(id);
+              return (
+                <MenuItem
+                  key={id}
+                  icon={a.icon}
+                  label={a.label}
+                  keys={a.keys}
+                  closeOnClick={false}
+                  onClick={() => {
+                    setMoreOpen(false);
+                    a.run();
+                  }}
+                  trailing={
+                    <span
+                      role="button"
+                      tabIndex={-1}
+                      aria-label={isPinned ? "Unpin from the toolbar" : "Pin to the toolbar"}
+                      title={isPinned ? "Unpin from the toolbar" : "Pin to the toolbar"}
+                      className="flex"
+                      style={{ color: isPinned ? "var(--foreground)" : "var(--muted)", cursor: "pointer" }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onTogglePin(id);
+                      }}
+                    >
+                      <Icon name={isPinned ? "pinOn" : "pin"} />
+                    </span>
+                  }
+                />
+              );
+            })}
+            <MenuSeparator />
+            <MenuSubmenu icon="wand" label="Run a macro" disabled={props.macros.length === 0}>
+              {props.macros.map((m) => (
+                <MenuItem key={m} icon="play" label={m} onClick={() => props.onRunMacro(m)} />
               ))}
-            </div>
-          </>
-        )}
-        <div className="w-px h-3.5 bg-border/30 mx-1" />
-        <div className="flex items-center gap-0.5 no-drag">
-          {shiftHeld
-            ? <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={onRotate} title="Rotate"><ArrowPathIcon /></Button>
-            : <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={onOpenCommandBar} title="Commands"><CommandLineIcon /></Button>}
-          {shiftHeld
-            ? <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={onToggleRecording} title={recording ? "Stop Recording" : "Record"}>{recording ? <StopIcon className="text-[#f44]" /> : <VideoCameraIcon />}</Button>
-            : <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={onTakeScreenshot} title="Screenshot"><CameraIcon /></Button>}
-          <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={onToggleSettings} title="Settings"><Cog6ToothIcon /></Button>
-          <Button variant="ghost" className={`${mirrorToolbarBtnClass} ${alwaysOnTop ? "text-brand" : ""}`} onClick={onToggleAlwaysOnTop} title={alwaysOnTop ? "Disable Always on Top" : "Always on Top"}>
-            <svg viewBox="0 0 24 24" fill={alwaysOnTop ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5" /><path d="M5 17h14" /><path d="M15 3H9v7l-2.5 7h11L15 10V3z" /></svg>
-          </Button>
-          <Button variant="ghost" className={mirrorToolbarBtnClass} onClick={onDisconnect} title="Disconnect"><XMarkIcon /></Button>
-        </div>
+            </MenuSubmenu>
+            <MenuItem icon="wand" label={macroRecording ? "Stop recording the macro" : "Record a macro"} keys="⇧⌘M" onClick={props.onToggleMacroRecording} />
+            <MenuItem icon="search" label="Command bar" keys="⌘K" onClick={props.onOpenCommandBar} />
+            <MenuItem icon={props.alwaysOnTop ? "pinOn" : "pin"} label={props.alwaysOnTop ? "Stop keeping on top" : "Keep on top"} keys="⇧⌘T" onClick={props.onToggleAlwaysOnTop} />
+            <MenuItem icon="settings" label="Settings" keys="⌘," onClick={props.onOpenSettings} />
+            <MenuSeparator />
+            <MenuItem icon="unplug" label="Disconnect" keys="⌘D" danger onClick={props.onDisconnect} />
+          </MenuPopup>
+        </Menu.Root>
       </div>
 
-      {/* Canvas viewport */}
-      <div className="flex-1 flex items-center justify-center overflow-hidden outline-none relative" tabIndex={0} onKeyDown={onKeyDown} onCompositionStart={onCompositionStart} onCompositionEnd={onCompositionEnd}>
-        {connecting ? (
-          <div className="flex flex-col items-center gap-4 text-text-3">
-            <div className="size-6 border-2 border-border border-t-brand rounded-full animate-spin" />
-            <p className="text-[13px] font-medium">Connecting...</p>
-          </div>
-        ) : (
+      <div className="flex-1 min-h-0 flex gap-2">
+        <div
+          className={`relative flex-1 min-w-0 flex items-center justify-center overflow-hidden outline-none ${nativeVideo ? "native-video-frame" : ""}`}
+          style={{ borderRadius: 12, background: nativeVideo ? undefined : "#0a0a0b" }}
+          tabIndex={0}
+          onKeyDown={props.onKeyDown}
+          onCompositionStart={props.onCompositionStart}
+          onCompositionEnd={props.onCompositionEnd}
+        >
           <canvas
             ref={canvasRef}
             width={deviceSize.width}
             height={deviceSize.height}
-            className="max-w-full max-h-full object-contain cursor-default block"
-            onMouseDown={(e) => { isMouseDownRef.current = true; onCanvasMouseEvent(e, "down"); }}
-            onMouseMove={(e) => { if (isMouseDownRef.current) onCanvasMouseEvent(e, "move"); }}
-            onMouseUp={(e) => { isMouseDownRef.current = false; onCanvasMouseEvent(e, "up"); }}
-            onMouseLeave={(e) => { if (isMouseDownRef.current) { isMouseDownRef.current = false; onCanvasMouseEvent(e, "up"); } }}
-            onWheel={onWheel}
+            className={`max-w-full max-h-full object-contain cursor-default block transition-opacity duration-300 ${nativeVideo ? "native-video-hole" : streamReady ? "opacity-100" : "opacity-0"}`}
+            onMouseDown={(e) => { isMouseDownRef.current = true; props.onCanvasMouseEvent(e, "down"); }}
+            onMouseMove={(e) => { if (isMouseDownRef.current) props.onCanvasMouseEvent(e, "move"); }}
+            onMouseUp={(e) => { isMouseDownRef.current = false; props.onCanvasMouseEvent(e, "up"); }}
+            onMouseLeave={(e) => { if (isMouseDownRef.current) { isMouseDownRef.current = false; props.onCanvasMouseEvent(e, "up"); } }}
+            onWheel={props.onWheel}
             onContextMenu={(e) => e.preventDefault()}
           />
-        )}
 
-        {recording && (
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2.5 py-1.5 px-2.5 pl-3.5 bg-black/75 backdrop-blur-xl rounded-full z-10 animate-in fade-in slide-in-from-bottom-2 duration-200">
-            <span className="size-2 rounded-full bg-[#f44] shrink-0 animate-pulse" />
-            
-            <span className="text-[13px] font-semibold font-mono 
-            text-white min-w-10">{formatTime(elapsed)}</span>
-            <Button variant="ghost" className="flex items-center gap-1 px-2.5 py-1 h-auto bg-[#f44] border-transparent rounded-xl text-white text-xs font-semibold hover:bg-[#e33] [&_svg]:size-3" onClick={onToggleRecording}>
-              <StopIcon />
-              Stop
-            </Button>
-          </div>
-        )}
+          {!streamReady && (
+            <div className="t-dark absolute inset-0 flex items-center justify-center p-6" style={{ background: "radial-gradient(120% 70% at 20% 10%, #2b2e35 0%, #17181b 55%, #101012 100%)", color: "var(--foreground)" }}>
+              <StartingState name={name} brand={props.brand} path={props.path} steps={props.steps} />
+            </div>
+          )}
 
-        {macroRecording && (
-          <div className="absolute bottom-[52px] left-1/2 -translate-x-1/2 flex items-center gap-2.5 py-1.5 px-2.5 pl-3.5 bg-black/75 backdrop-blur-xl rounded-full z-10 animate-in fade-in slide-in-from-bottom-2 duration-200">
-            <svg width="12" height="12" viewBox="0 0 24 25" fill="none" className="text-[#f90] shrink-0 animate-pulse">
-              <path d="M11.41 2.068c-.57 0-1.08 0-1.55.17-.1.04-.19.08-.29.12-.46.22-.81.58-1.21.98L3.58 8.148c-.47.47-.88.88-1.11 1.43-.22.54-.22 1.13-.22 1.8v3.47c0 1.78 0 3.22.15 4.35.16 1.17.49 2.16 1.27 2.95.78.78 1.76 1.12 2.93 1.28 1.12.15 2.55.15 4.33.15s3.31 0 4.43-.15c-.49-1.1-1.51-2.09-2.61-2.52-1.66-.65-1.66-3.01 0-3.66 1.16-.46 2.22-1.52 2.67-2.67.66-1.66 3.01-1.66 3.66 0 .16.41.39.81.67 1.17V14.858c0-1.53 0-2.77-.11-3.75-.12-1.02-.37-1.89-.96-2.63-.22-.27-.46-.52-.73-.74-.73-.6-1.6-.85-2.61-.97-1.18-.11-2.4-.11-3.92-.11z" fill="currentColor" opacity="0.5"/>
-              <path fillRule="evenodd" clipRule="evenodd" d="M9.569 2.358c.09-.05.19-.09.29-.12.21-.07.42-.12.65-.14v1.99c0 1.36 0 2.01-.12 2.88-.12.9-.38 1.66-.98 2.26s-1.36.86-2.26.98c-.87.12-1.52.12-2.88.12H2.289c.03-.26.09-.51.18-.75.22-.54.64-.96 1.11-1.43l4.78-4.81c.4-.4.76-.77 1.21-.98zM17.919 23.118c-.24.61-1.09.61-1.33 0l-.04-.1a5.73 5.73 0 00-3.23-3.23l-.11-.04c-.6-.24-.6-1.1 0-1.33l.11-.04a5.73 5.73 0 003.23-3.23l.04-.1c.24-.61 1.09-.61 1.33 0l.04.1a5.73 5.73 0 003.23 3.23l.11.04c.6.24.6 1.1 0 1.33l-.11.04a5.73 5.73 0 00-3.23 3.23l-.04.1z" fill="currentColor"/>
-            </svg>
-            <span className="text-[13px] font-semibold font-mono text-white min-w-10">{formatTime(macroElapsed)}</span>
-            <Button variant="ghost" className="flex items-center gap-1 px-2.5 py-1 h-auto bg-[#f90] border-transparent rounded-xl text-white text-xs font-semibold hover:bg-[#e80] [&_svg]:size-3" onClick={onToggleMacroRecording}>
-              <StopIcon />
-              Stop
-            </Button>
-          </div>
-        )}
+          {statsOn && perfStats && (
+            <div className="glass mono t-dark absolute pointer-events-none" style={{ top: 8, left: 8, padding: "8px 12px", borderRadius: 16, color: "#fcfcfc", lineHeight: "20px", display: "grid", gridTemplateColumns: "auto auto", columnGap: 16 }}>
+              <span style={{ color: "#9f9fa9" }}>fps</span><span className="text-right">{perfStats.renderFps}</span>
+              <span style={{ color: "#9f9fa9" }}>latency</span><span className="text-right">{perfStats.screenMs > 0 ? `${perfStats.screenMs.toFixed(0)} ms` : `${perfStats.deviceLagMs.toFixed(0)} ms`}</span>
+              <span style={{ color: "#9f9fa9" }}>decode</span><span className="text-right">{perfStats.decodeMs.toFixed(1)} ms</span>
+              <span style={{ color: "#9f9fa9" }}>bitrate</span><span className="text-right">{(perfStats.bitrateKbps / 1000).toFixed(1)} Mbps</span>
+              <span style={{ color: "#9f9fa9" }}>device lag</span><span className="text-right">{perfStats.deviceLagMs.toFixed(0)} ms</span>
+              <span style={{ color: "#9f9fa9" }}>dropped</span><span className="text-right">{perfStats.dropped}</span>
+              {perfStats.width > 0 && <><span style={{ color: "#9f9fa9" }}>size</span><span className="text-right">{perfStats.width}×{perfStats.height} {perfStats.codec}</span></>}
+              {props.adaptive && <><span style={{ color: "#9f9fa9" }}>adaptive</span><span className="text-right">{props.adaptive.tier}</span></>}
+            </div>
+          )}
 
-        {adaptiveInfo?.enabled && (
-          <div className="absolute bottom-2 left-2 px-2 py-0.5 bg-black/60 backdrop-blur-lg rounded-md text-text-2 font-mono text-[10px] z-5 pointer-events-none">
-            {adaptiveInfo.tierName} &middot; {adaptiveInfo.fps} FPS
-          </div>
-        )}
+          {props.reconnecting && (
+            <>
+              <div className="absolute inset-0 pointer-events-none" style={{ background: "rgba(0,0,0,.35)", backdropFilter: "grayscale(1)", WebkitBackdropFilter: "grayscale(1)" }} />
+              <div className="glass toast t-dark absolute" style={{ left: 12, right: 12, bottom: 12, color: "#fcfcfc" }}>
+                <span className="spinner" />
+                <span className="flex-1 min-w-0">{props.reconnecting.message}</span>
+                {props.reconnecting.action && <button type="button" className="button button--secondary" onClick={props.reconnecting.action.run}>{props.reconnecting.action.label}</button>}
+              </div>
+            </>
+          )}
+
+          {macroRecording && !props.reconnecting && (
+            <div className="glass toast t-dark absolute" style={{ left: 12, right: 12, bottom: 12, color: "#fcfcfc" }}>
+              <span className="dot" style={{ width: 8, height: 8, margin: "0 6px", background: "var(--rec)" }} />
+              <span className="flex-1 min-w-0">Recording a macro <span style={{ fontVariantNumeric: "tabular-nums", color: "#9f9fa9" }}>{macroTime}</span></span>
+              <button type="button" className="button button--secondary" onClick={props.onToggleMacroRecording}>Stop</button>
+            </div>
+          )}
+        </div>
+
+        <div className="relative z-10 flex flex-col items-center gap-1 shrink-0" style={{ width: 32 }}>
+          <RailButton icon="backOn" label="Back" onClick={() => props.onPressButton("back")} />
+          <RailButton icon="homeOn" label="Home" onClick={() => props.onPressButton("home")} />
+          <RailButton icon="recentsOn" label="Recent apps" onClick={() => props.onPressButton("recents")} />
+          {!landscape && (
+            <>
+              {RAIL_GAP}
+              <RailButton icon="volumeUp" label="Volume up" onClick={() => props.onPressButton("volume_up")} />
+              <RailButton icon="volumeDown" label="Volume down" onClick={() => props.onPressButton("volume_down")} />
+              <RailButton icon="powerOn" label="Power" onClick={() => props.onPressButton("power")} />
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

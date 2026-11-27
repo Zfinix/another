@@ -1,24 +1,17 @@
-import {
-  Command,
-  CommandInput,
-  CommandList,
-  CommandEmpty,
-  CommandGroup,
-  CommandItem,
-  CommandShortcut,
-} from "@/components/ui/command";
-import {
-  Dialog,
-  DialogOverlay,
-  DialogPortal,
-} from "@/components/ui/dialog";
-import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
+import { useEffect, useState } from "react";
+import { Command } from "cmdk";
+import { AppDialog } from "@/components/ui/dialog";
+import { Icon } from "@/components/Icon";
+import type { IconName } from "@/lib/icons";
 
-interface CommandDef {
+export interface CommandDef {
   id: string;
   label: string;
   keys: string[];
   section: string;
+  icon: IconName;
+  meta?: string;
+  hidden?: boolean;
   action: () => void;
 }
 
@@ -28,48 +21,63 @@ interface CommandBarProps {
   commands: CommandDef[];
 }
 
+function Highlight({ text, query }: { text: string; query: string }) {
+  const q = query.trim();
+  const at = q ? text.toLowerCase().indexOf(q.toLowerCase()) : -1;
+  if (at < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, at)}
+      <b style={{ fontWeight: 600, color: "var(--foreground)" }}>{text.slice(at, at + q.length)}</b>
+      {text.slice(at + q.length)}
+    </>
+  );
+}
+
 export function CommandBar({ open, onOpenChange, commands }: CommandBarProps) {
-  const sections = [...new Set(commands.map((c) => c.section))];
+  const [query, setQuery] = useState("");
+  const visible = commands.filter((c) => !c.hidden);
+  const sections = [...new Set(visible.map((c) => c.section))];
+
+  useEffect(() => {
+    if (open) setQuery("");
+  }, [open]);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogPortal>
-        <DialogOverlay />
-        <DialogPrimitive.Popup className="fixed top-20 left-1/2 -translate-x-1/2 w-[360px] max-w-[90vw] max-h-[400px] z-50 animate-in fade-in zoom-in-95 duration-100">
-          <Command className="rounded-xl bg-surface border border-border shadow-[0_16px_48px_rgba(0,0,0,0.3)] overflow-hidden">
-            <CommandInput placeholder="Type a command..." />
-            <CommandList>
-              <CommandEmpty>No matching commands</CommandEmpty>
-              {sections.map((section) => (
-                <CommandGroup key={section} heading={section}>
-                  {commands
-                    .filter((c) => c.section === section)
-                    .map((cmd) => (
-                      <CommandItem
-                        key={cmd.id}
-                        onSelect={() => {
-                          onOpenChange(false);
-                          cmd.action();
-                        }}
-                      >
-                        <span>{cmd.label}</span>
-                        {cmd.keys.length > 0 && (
-                          <CommandShortcut className="flex gap-1 tracking-normal">
-                            {cmd.keys.map((k, i) => (
-                              <kbd key={i} className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-[5px] bg-surface-3 border border-border rounded-[5px] text-[11px] font-sans font-medium text-text-2 shadow-[0_1px_0] shadow-border tracking-normal">
-                                {k}
-                              </kbd>
-                            ))}
-                          </CommandShortcut>
-                        )}
-                      </CommandItem>
-                    ))}
-                </CommandGroup>
-              ))}
-            </CommandList>
-          </Command>
-        </DialogPrimitive.Popup>
-      </DialogPortal>
-    </Dialog>
+    <AppDialog open={open} onOpenChange={onOpenChange} label="Command bar" top={144} style={{ width: "100%", maxWidth: 576 }}>
+      <Command label="Command bar" loop className="flex flex-col gap-2" filter={(value, search) => (value.toLowerCase().includes(search.trim().toLowerCase()) ? 1 : 0)}>
+        <label className="flex items-center gap-2 px-2" style={{ height: 40, color: "var(--muted)" }}>
+          <Icon name="search" />
+          <Command.Input value={query} onValueChange={setQuery} placeholder="Search commands" aria-label="Search commands" className="flex-1 min-w-0 bg-transparent outline-none" style={{ fontSize: 15, color: "var(--foreground)" }} autoFocus />
+          <span className="kbd">esc</span>
+        </label>
+        <hr className="rule" />
+        <Command.List className="scroll" style={{ maxHeight: "min(420px, calc(100vh - 280px))" }}>
+          <Command.Empty className="label" style={{ height: 36 }}>No matching commands</Command.Empty>
+          {sections.map((section) => (
+            <Command.Group key={section} heading={section} className="cmd-group">
+              {visible
+                .filter((c) => c.section === section)
+                .map((c) => (
+                  <Command.Item
+                    key={c.id}
+                    value={`${c.label} ${c.section}`}
+                    className="item cmd-item"
+                    onSelect={() => {
+                      onOpenChange(false);
+                      c.action();
+                    }}
+                  >
+                    <Icon name={c.icon} />
+                    <span className="flex-1 min-w-0 truncate"><Highlight text={c.label} query={query} /></span>
+                    {c.meta && <span className="count">{c.meta}</span>}
+                    {c.keys.length > 0 && <span className="kbd">{c.keys.join("")}</span>}
+                  </Command.Item>
+                ))}
+            </Command.Group>
+          ))}
+        </Command.List>
+      </Command>
+    </AppDialog>
   );
 }

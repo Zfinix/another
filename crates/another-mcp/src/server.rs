@@ -1,6 +1,7 @@
 use another_core::macro_engine::{self, MacroEvent, MacroRecorder};
 use another_core::{adb, accessibility, control, scrcpy};
 use another_core::scrcpy::StreamSettings;
+use another_core::transport::DeviceStream;
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -11,12 +12,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 struct Session {
     device_serial: String,
-    control_socket: Arc<Mutex<TcpStream>>,
+    control_socket: Arc<Mutex<DeviceStream>>,
     screen_width: u32,
     screen_height: u32,
     shutdown: Arc<tokio::sync::Notify>,
@@ -251,6 +251,12 @@ impl AnotherMcp {
             video_bit_rate: 500000,
             video_codec: "h264".to_string(),
             audio: false,
+            direct_adb: false,
+            low_latency: false,
+            encoder_tuning: Default::default(),
+            another_server: false,
+            native_video: false,
+            network_stream: false,
         };
 
         let port: u16 = 27183;

@@ -1,33 +1,47 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Another",
-  "version": "0.4.4",
+  "version": "1.0.0",
   "identifier": "com.chizi.another",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": "bash scripts/build-cli.sh debug && bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run build",
+    "beforeBuildCommand": "bash scripts/build-cli.sh release && bun run build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
         "title": "Another",
-        "width": 380,
-        "height": 750,
+        "width": 1120,
+        "height": 760,
         "resizable": true,
-        "minWidth": 280,
-        "minHeight": 400,
+        "minWidth": 720,
+        "minHeight": 520,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "acceptFirstMouse": true
+        "acceptFirstMouse": true,
+        "label": "main",
+        "transparent": true,
+        "trafficLightPosition": {
+          "x": 28,
+          "y": 28
+        }
       }
     ],
     "security": {
       "csp": null
-    }
+    },
+    "macOSPrivateApi": true
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "another"
+        ]
+      }
+    },
     "updater": {
       "endpoints": [
         "https://github.com/Zfinix/another/releases/latest/download/latest.json"
@@ -39,7 +53,9 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": "all",
-    "resources": ["resources/*"],
+    "resources": [
+      "resources/*"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -50,6 +66,9 @@
     "macOS": {
       "signingIdentity": "Developer ID Application",
       "minimumSystemVersion": "10.15"
-    }
+    },
+    "externalBin": [
+      "binaries/another-cli"
+    ]
   }
 }

@@ -1,0 +1,16 @@
+Another server
+
+This server is original Kotlin code, except where noted below.
+
+Device-specific logic is ported from scrcpy-server 2.7 (https://github.com/Genymobile/scrcpy),
+Copyright (C) 2018 Genymobile, licensed under the Apache License, Version 2.0 (see LICENSE):
+- Workarounds.kt: the application context and ActivityThread setup a shell process needs
+- Services.kt: the reflection paths into DisplayManagerGlobal, SurfaceControl, InputManager,
+  IWindowManager, IPowerManager and ActivityManager, including per-version fallbacks
+- ScreenCapture.kt: the DisplayManager mirror path and the SurfaceControl fallback
+- VideoEncoder.kt: the video size computation and encoder retry/downsize behaviour
+- Controller.kt: the control message layouts and the multi-pointer touch handling
+- AudioCapture.kt: the Android 11 audio workaround and audio timestamp fixing
+
+The wire protocol is scrcpy 2.7's, extended with control messages 100 (set video bit rate)
+and 101 (request key frame).

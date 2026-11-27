@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use tokio::process::Command;
 
 #[cfg(windows)]
@@ -10,6 +11,9 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static REFRESH_RATES: OnceLock<Mutex<HashMap<String, f32>>> = OnceLock::new();
+
+const REFRESH_RATE_KEYS: [&str; 4] = ["fps=", "renderFrameRate ", "refreshRate=", "refreshRate "];
 
 pub fn set_resource_dir(path: PathBuf) {
     let _ = RESOURCE_DIR.set(path);
@@ -153,6 +157,10 @@ pub async fn shell(serial: &str, cmd: &str) -> Result<tokio::process::Child> {
     Ok(child)
 }
 
+pub async fn shell_text(serial: &str, cmd: &str) -> Result<String> {
+    run_adb_text(&["-s", serial, "shell", cmd]).await
+}
+
 pub async fn reverse(serial: &str, remote: &str, local_port: u16) -> Result<()> {
     run_adb(&[
         "-s",
@@ -216,6 +224,148 @@ pub async fn connect_device(address: &str) -> Result<()> {
     }
 }
 
+/// Pairs with a phone's Wireless debugging pairing code (Android 11 and up).
+pub async fn pair(address: &str, code: &str) -> Result<()> {
+    let output = run_adb_text(&["pair", address, code]).await?;
+    if output.contains("Successfully paired") {
+        Ok(())
+    } else {
+        Err(anyhow!("{}", output.trim()))
+    }
+}
+
+pub async fn notifications(serial: &str) -> Result<Vec<crate::notifications::PhoneNotification>> {
+    let output = run_adb_text(&["-s", serial, "shell", "dumpsys", "notification", "--noredact"]).await?;
+    Ok(crate::notifications::parse_dumpsys(&output))
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeviceInfo {
+    pub manufacturer: String,
+    pub model: String,
+    pub market_name: String,
+    pub android_version: String,
+    pub avd_name: String,
+    pub avd_device: String,
+    pub avd_manufacturer: String,
+}
+
+const INFO_PROPS: [&str; 5] = [
+    "ro.product.manufacturer",
+    "ro.product.model",
+    "ro.product.marketname",
+    "ro.product.vendor.marketname",
+    "ro.build.version.release",
+];
+
+const KEYCODE_WAKEUP: &str = "224";
+const KEYCODE_SLEEP: &str = "223";
+const WAKE_SETTLE: std::time::Duration = std::time::Duration::from_millis(900);
+
+async fn screen_awake(serial: &str) -> Result<bool> {
+    Ok(shell_text(serial, "dumpsys power").await?.contains("mWakefulness=Awake"))
+}
+
+async fn keyguard_showing(serial: &str) -> Result<bool> {
+    let window = shell_text(serial, "dumpsys window").await?;
+    Ok(window.contains("isKeyguardShowing=true") || window.contains("mShowingLockscreen=true"))
+}
+
+/// A screenshot of the lock screen, or `None` when the phone is unlocked and in use, or has no
+/// lock screen. A sleeping phone is woken just long enough for the capture, then put back to sleep.
+pub async fn lock_screen_capture(serial: &str) -> Result<Option<Vec<u8>>> {
+    if screen_awake(serial).await? {
+        if keyguard_showing(serial).await? {
+            return exec_out_screencap(serial).await.map(Some);
+        }
+        return Ok(None);
+    }
+    run_adb(&["-s", serial, "shell", "input", "keyevent", KEYCODE_WAKEUP]).await?;
+    tokio::time::sleep(WAKE_SETTLE).await;
+    let capture = if keyguard_showing(serial).await? {
+        exec_out_screencap(serial).await.map(Some)
+    } else {
+        Ok(None)
+    };
+    run_adb(&["-s", serial, "shell", "input", "keyevent", KEYCODE_SLEEP]).await?;
+    capture
+}
+
+/// Who made the phone and what it is called, read in one round trip. Emulators also report the
+/// device profile from their AVD config, such as `pixel_8`.
+pub async fn device_info(serial: &str) -> Result<DeviceInfo> {
+    let command = INFO_PROPS.iter().map(|p| format!("echo \"$(getprop {p})\"")).collect::<Vec<_>>().join(";");
+    let output = shell_text(serial, &command).await?;
+    let mut values = output.lines().map(|l| l.trim().to_string());
+    let mut next = || values.next().unwrap_or_default();
+    let manufacturer = next();
+    let model = next();
+    let market_name = next();
+    let vendor_market_name = next();
+    let mut info = DeviceInfo {
+        manufacturer,
+        model,
+        market_name: if market_name.is_empty() { vendor_market_name } else { market_name },
+        android_version: next(),
+        ..DeviceInfo::default()
+    };
+    if serial.starts_with("emulator-") {
+        if let Ok(name) = emulator_avd_name(serial).await {
+            if let Some((device, maker)) = avd_profile(&name) {
+                info.avd_device = device;
+                info.avd_manufacturer = maker;
+            }
+            info.avd_name = name;
+        }
+    }
+    Ok(info)
+}
+
+fn avd_home() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("ANDROID_AVD_HOME") {
+        return Some(PathBuf::from(dir));
+    }
+    if let Ok(dir) = std::env::var("ANDROID_USER_HOME") {
+        return Some(PathBuf::from(dir).join("avd"));
+    }
+    std::env::var("HOME").ok().map(|home| PathBuf::from(home).join(".android").join("avd"))
+}
+
+/// Reads `hw.device.name` and `hw.device.manufacturer` from an AVD's config.ini.
+pub fn avd_profile(avd_name: &str) -> Option<(String, String)> {
+    let config = std::fs::read_to_string(avd_home()?.join(format!("{avd_name}.avd")).join("config.ini")).ok()?;
+    let value = |key: &str| {
+        config
+            .lines()
+            .find_map(|line| line.strip_prefix(key).and_then(|rest| rest.trim_start().strip_prefix('=')))
+            .map(|v| v.trim().to_string())
+    };
+    Some((value("hw.device.name")?, value("hw.device.manufacturer").unwrap_or_default()))
+}
+
+/// The AVD name of an emulator, such as `Pixel_9_API_36`.
+pub async fn emulator_avd_name(serial: &str) -> Result<String> {
+    let output = run_adb_text(&["-s", serial, "emu", "avd", "name"]).await?;
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != "OK")
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("The emulator did not report its name"))
+}
+
+pub async fn launch_app(serial: &str, package: &str) -> Result<()> {
+    run_adb(&["-s", serial, "shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"]).await?;
+    Ok(())
+}
+
+/// Sets `stay_on_while_plugged_in` and returns the value it replaced, so the caller can restore it.
+pub async fn set_stay_on(serial: &str, value: &str) -> Result<String> {
+    let previous = run_adb_text(&["-s", serial, "shell", "settings", "get", "global", "stay_on_while_plugged_in"]).await?;
+    run_adb(&["-s", serial, "shell", "settings", "put", "global", "stay_on_while_plugged_in", value]).await?;
+    Ok(previous.trim().to_string())
+}
+
 pub async fn tcpip(serial: &str, port: u16) -> Result<()> {
     run_adb(&["-s", serial, "tcpip", &port.to_string()]).await?;
     Ok(())
@@ -255,4 +405,56 @@ pub async fn get_device_ip(serial: &str) -> Result<Option<String>> {
     }
 
     Ok(None)
+}
+
+pub fn parse_peak_refresh_rate(dumpsys_display: &str) -> Option<f32> {
+    let mut peak: Option<f32> = None;
+    for key in REFRESH_RATE_KEYS {
+        for (idx, _) in dumpsys_display.match_indices(key) {
+            let rest = &dumpsys_display[idx + key.len()..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .unwrap_or(rest.len());
+            if let Ok(rate) = rest[..end].parse::<f32>() {
+                if rate > 0.0 && peak.is_none_or(|p| rate > p) {
+                    peak = Some(rate);
+                }
+            }
+        }
+    }
+    peak
+}
+
+pub async fn peak_refresh_rate(serial: &str) -> Option<f32> {
+    let cache = REFRESH_RATES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(rate) = cache.lock().ok()?.get(serial) {
+        return Some(*rate);
+    }
+    let output = run_adb_text(&["-s", serial, "shell", "dumpsys", "display"]).await.ok()?;
+    let rate = parse_peak_refresh_rate(&output)?;
+    cache.lock().ok()?.insert(serial.to_string(), rate);
+    Some(rate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_peak_refresh_rate;
+
+    #[test]
+    fn picks_the_highest_supported_mode() {
+        let dump = "DisplayModeRecord{mMode={id=1, width=1080, height=2400, fps=60.0}}\n\
+                    DisplayModeRecord{mMode={id=2, width=1080, height=2400, fps=120.00001}}";
+        assert_eq!(parse_peak_refresh_rate(dump).map(f32::round), Some(120.0));
+    }
+
+    #[test]
+    fn reads_render_frame_rate_and_older_fields() {
+        assert_eq!(parse_peak_refresh_rate("renderFrameRate 90.0"), Some(90.0));
+        assert_eq!(parse_peak_refresh_rate("mRefreshRate=60.0 refreshRate=60.0"), Some(60.0));
+    }
+
+    #[test]
+    fn unknown_output_gives_none() {
+        assert_eq!(parse_peak_refresh_rate("Display Devices: size=1"), None);
+    }
 }

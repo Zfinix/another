@@ -1,5 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { ThemePreference } from "../types";
+
+const THEME_FADE_MS = 360;
 
 function getInitialThemePreference(): ThemePreference {
   const stored = localStorage.getItem("theme");
@@ -13,10 +16,35 @@ export function useTheme() {
 
   const theme = themePref === "auto" ? (systemDark ? "dark" : "light") : themePref;
 
+  const firstPaint = useRef(true);
+
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    document.documentElement.classList.toggle("dark", theme === "dark");
+    const root = document.documentElement;
+    const apply = () => {
+      root.setAttribute("data-theme", theme);
+      root.classList.toggle("dark", theme === "dark");
+      root.classList.toggle("t-dark", theme === "dark");
+      root.classList.toggle("t-light", theme === "light");
+    };
+    const animate = !firstPaint.current && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    firstPaint.current = false;
+    if (!animate) {
+      apply();
+      return;
+    }
+    if (document.startViewTransition) {
+      document.startViewTransition(apply);
+      return;
+    }
+    root.classList.add("theme-fade");
+    apply();
+    const timer = setTimeout(() => root.classList.remove("theme-fade"), THEME_FADE_MS);
+    return () => clearTimeout(timer);
   }, [theme]);
+
+  useEffect(() => {
+    getCurrentWindow().setTheme(themePref === "auto" ? null : themePref).catch(() => { });
+  }, [themePref]);
 
   useEffect(() => {
     localStorage.setItem("theme", themePref);

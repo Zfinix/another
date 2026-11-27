@@ -1,6 +1,6 @@
 [package]
 name = "Another"
-version = "0.4.4"
+version = "1.0.0"
 description = "Android screen another and control"
 authors = ["you"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 another-core = { path = "../crates/another-core" }
@@ -25,4 +25,20 @@ tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
 anyhow = "1"
 rodio = { version = "0.19", default-features = false }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+getrandom = "0.2"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2.10.0"
+tauri-plugin-notification = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+objc2-quartz-core = "0.3"
+objc2-io-surface = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = { version = "0.3", features = ["objc2-io-surface"] }
+objc2-video-toolbox = "0.3"

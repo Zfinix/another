@@ -1,8 +1,8 @@
 use crate::control;
+use crate::transport::DeviceStream;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,7 +67,7 @@ impl MacroRecorder {
 
 pub async fn play_events(
     events: &[TimedEvent],
-    socket: &Arc<Mutex<TcpStream>>,
+    socket: &Arc<Mutex<DeviceStream>>,
     screen_w: u32,
     screen_h: u32,
 ) -> Result<()> {

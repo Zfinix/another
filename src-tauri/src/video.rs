@@ -1,13 +1,19 @@
+use crate::native_video::NativeVideo;
+use crate::stream_ws::VideoSocket;
+use another_core::h264;
+use another_core::transport::DeviceStream;
 use anyhow::Result;
 use base64::Engine;
 use std::sync::Arc;
 use tauri::ipc::Channel;
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
 const FLAG_CONFIG: u64 = 1 << 63;
 const FLAG_KEY_FRAME: u64 = 1 << 62;
+/// The Another server marks a config packet with every pts bit set to carry its clock instead.
+const CLOCK_PTS: u64 = FLAG_KEY_FRAME - 1;
+const CLOCK_PAYLOAD_SIZE: usize = 8;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum VideoCodec {
@@ -21,21 +27,53 @@ pub enum FrameEvent {
     #[serde(rename = "config")]
     Config { codec: String, description: String },
     #[serde(rename = "packet")]
-    Packet { key: bool, data: String, timestamp: u64 },
+    Packet {
+        key: bool,
+        data: String,
+        timestamp: u64,
+        recv_ms: f64,
+        capture_ms: Option<f64>,
+    },
     #[serde(rename = "disconnected")]
     Disconnected { reason: String },
+    #[serde(rename = "native_size")]
+    NativeSize { width: u32, height: u32 },
+    #[serde(rename = "native_stats")]
+    NativeStats {
+        fps: u32,
+        decode_ms: f64,
+        kbps: u32,
+        lag_ms: f64,
+        lag_max_ms: f64,
+        lag_min_ms: f64,
+        screen_ms: f64,
+        screen_max_ms: f64,
+        arrive_ms: f64,
+    },
+}
+
+fn epoch_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
 }
 
 pub async fn stream_video(
-    mut video_socket: TcpStream,
+    mut video_socket: DeviceStream,
     channel: Channel<FrameEvent>,
+    mut ws: Option<VideoSocket>,
+    mut native: Option<NativeVideo>,
     shutdown: Arc<Notify>,
     codec: VideoCodec,
 ) {
     let result = tokio::select! {
-        r = forward_loop(&mut video_socket, &channel, codec) => r,
+        r = forward_loop(&mut video_socket, &channel, ws.as_mut(), native.as_mut(), codec) => r,
         _ = shutdown.notified() => Ok(()),
     };
+    if let Some(ws) = ws {
+        ws.close().await;
+    }
 
     if let Err(e) = result {
         let _ = channel.send(FrameEvent::Disconnected {
@@ -45,10 +83,13 @@ pub async fn stream_video(
 }
 
 async fn forward_loop(
-    socket: &mut TcpStream,
+    socket: &mut DeviceStream,
     channel: &Channel<FrameEvent>,
+    mut ws: Option<&mut VideoSocket>,
+    mut native: Option<&mut NativeVideo>,
     codec: VideoCodec,
 ) -> Result<()> {
+    let mut clock_offset_ms: Option<f64> = None;
     loop {
         let mut header = [0u8; 12];
         socket.read_exact(&mut header).await?;
@@ -65,31 +106,67 @@ async fn forward_loop(
 
         let mut data = vec![0u8; size];
         socket.read_exact(&mut data).await?;
+        let recv_ms = epoch_ms();
+
+        if is_config && pts == CLOCK_PTS && data.len() == CLOCK_PAYLOAD_SIZE {
+            let device_us = u64::from_be_bytes(data[..CLOCK_PAYLOAD_SIZE].try_into()?);
+            let offset = recv_ms - device_us as f64 / 1000.0;
+            clock_offset_ms = Some(clock_offset_ms.map_or(offset, |best| best.min(offset)));
+            continue;
+        }
+        let capture_ms = (!is_config)
+            .then_some(clock_offset_ms)
+            .flatten()
+            .map(|offset| pts as f64 / 1000.0 + offset);
 
         if is_config {
             let nals = split_nals(&data);
+            if let Some(native) = native.as_deref_mut() {
+                let sets = parameter_sets(&nals, codec);
+                let refs: Vec<&[u8]> = sets.iter().map(Vec::as_slice).collect();
+                if let Err(e) = native.configure(codec, &refs) {
+                    eprintln!("[native-video] {}", e);
+                }
+                continue;
+            }
             let (codec_str, desc) = match codec {
                 VideoCodec::H264 => parse_h264_config(&nals),
                 VideoCodec::H265 => parse_h265_config(&nals),
             };
+            if let Some(ws) = ws.as_deref_mut() {
+                ws.send_config(&codec_str, &desc).await?;
+                continue;
+            }
             let _ = channel.send(FrameEvent::Config {
                 codec: codec_str,
                 description: base64::engine::general_purpose::STANDARD.encode(&desc),
             });
         } else {
-            let avcc = nals_to_avcc(&data);
+            let avcc = nals_to_avcc(&data, codec);
+            if let Some(native) = native.as_deref_mut() {
+                if let Err(e) = native.decode(&avcc, pts, recv_ms, capture_ms) {
+                    eprintln!("[native-video] {}", e);
+                }
+                continue;
+            }
+            if let Some(ws) = ws.as_deref_mut() {
+                ws.send_packet(is_key, pts, recv_ms, capture_ms, &avcc).await?;
+                continue;
+            }
             let _ = channel.send(FrameEvent::Packet {
                 key: is_key,
                 data: base64::engine::general_purpose::STANDARD.encode(&avcc),
                 timestamp: pts,
+                recv_ms,
+                capture_ms,
             });
         }
     }
 }
 
 fn parse_h264_config(nals: &[&[u8]]) -> (String, Vec<u8>) {
-    let mut sps_list: Vec<&[u8]> = Vec::new();
-    let mut pps_list: Vec<&[u8]> = Vec::new();
+    let mut sps_list: Vec<Vec<u8>> = Vec::new();
+    let mut pps_list: Vec<Vec<u8>> = Vec::new();
     let mut codec = String::from("avc1.42001e");
 
     for nal in nals {
@@ -99,13 +176,15 @@ fn parse_h264_config(nals: &[&[u8]]) -> (String, Vec<u8>) {
         let nal_type = nal[0] & 0x1F;
         if nal_type == 7 && nal.len() >= 4 {
             codec = format!("avc1.{:02x}{:02x}{:02x}", nal[1], nal[2], nal[3]);
-            sps_list.push(nal);
+            sps_list.push(without_reordering(nal));
         } else if nal_type == 8 {
-            pps_list.push(nal);
+            pps_list.push(nal.to_vec());
         }
     }
 
-    (codec, build_avcc(&sps_list, &pps_list))
+    let sps_refs: Vec<&[u8]> = sps_list.iter().map(Vec::as_slice).collect();
+    let pps_refs: Vec<&[u8]> = pps_list.iter().map(Vec::as_slice).collect();
+    (codec, build_avcc(&sps_refs, &pps_refs))
 }
 
 fn parse_h265_config(nals: &[&[u8]]) -> (String, Vec<u8>) {
@@ -272,10 +351,41 @@ fn build_avcc(sps_list: &[&[u8]], pps_list: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-fn nals_to_avcc(data: &[u8]) -> Vec<u8> {
+fn parameter_sets(nals: &[&[u8]], codec: VideoCodec) -> Vec<Vec<u8>> {
+    let mut sets = Vec::new();
+    for nal in nals.iter().filter(|nal| !nal.is_empty()) {
+        match codec {
+            VideoCodec::H264 => match nal[0] & 0x1F {
+                7 => sets.push(without_reordering(nal)),
+                8 => sets.push(nal.to_vec()),
+                _ => {}
+            },
+            VideoCodec::H265 => {
+                if (32..=34).contains(&((nal[0] >> 1) & 0x3F)) {
+                    sets.push(nal.to_vec());
+                }
+            }
+        }
+    }
+    sets
+}
+
+fn without_reordering(sps: &[u8]) -> Vec<u8> {
+    match h264::declare_no_reordering(sps) {
+        Some(rewritten) => {
+            eprintln!("[video] declared no frame reordering in the H.264 SPS");
+            rewritten
+        }
+        None => sps.to_vec(),
+    }
+}
+
+fn nals_to_avcc(data: &[u8], codec: VideoCodec) -> Vec<u8> {
     let nals = split_nals(data);
     let mut out = Vec::with_capacity(data.len());
     for nal in nals {
+        let rewritten = (codec == VideoCodec::H264 && h264::is_sps(nal)).then(|| without_reordering(nal));
+        let nal = rewritten.as_deref().unwrap_or(nal);
         let len = nal.len() as u32;
         out.extend_from_slice(&len.to_be_bytes());
         out.extend_from_slice(nal);

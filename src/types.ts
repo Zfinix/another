@@ -1,3 +1,17 @@
+export interface TailnetPeer {
+  name: string;
+  dns_name: string;
+  address: string;
+  online: boolean;
+  direct: boolean;
+  relay: string;
+}
+
+export interface TailnetStatus {
+  running: boolean;
+  peers: TailnetPeer[];
+}
+
 export interface Device {
   serial: string;
   model: string;
@@ -5,11 +19,25 @@ export interface Device {
   wifi_available?: boolean;
 }
 
-export interface Toast {
+export type ToastType = "error" | "info" | "success";
+
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
+export interface ToastOptions {
+  detail?: string;
+  action?: ToastAction;
+}
+
+export interface Toast extends ToastOptions {
   id: number;
   message: string;
-  type: "error" | "info";
+  type: ToastType;
 }
+
+export type ShowToast = (message: string, type?: ToastType, options?: ToastOptions) => void;
 
 export interface Settings {
   max_size: number;
@@ -18,6 +46,74 @@ export interface Settings {
   video_codec: string;
   audio: boolean;
   adaptive: boolean;
+  adaptive_network?: boolean;
+}
+
+export type EncoderTuning =
+  | "default"
+  | "constant_bitrate"
+  | "constant_bitrate_drop_frames"
+  | "intra_refresh"
+  | "high_profile";
+
+export const ENCODER_TUNING_OPTIONS: { value: EncoderTuning; label: string }[] = [
+  { value: "default", label: "Default" },
+  { value: "constant_bitrate", label: "Constant bitrate" },
+  { value: "constant_bitrate_drop_frames", label: "CBR, drop frames" },
+  { value: "intra_refresh", label: "Intra refresh" },
+  { value: "high_profile", label: "High profile" },
+];
+
+export const PROFILE_VERSION = 1;
+
+export interface Profile {
+  version: number;
+  stream?: Partial<Settings>;
+  dev?: Partial<DevSettings>;
+}
+
+export type RemoteCommand =
+  | { action: "apply"; profile: Profile; connect?: string }
+  | { action: "connect"; serial: string }
+  | { action: "disconnect" }
+  | { action: "measure" };
+
+export interface DevSettings {
+  perfOverlay: boolean;
+  directAdb: boolean;
+  lowLatency: boolean;
+  encoderTuning: EncoderTuning;
+  anotherServer: boolean;
+  nativeVideo: boolean;
+  networkStream: boolean;
+}
+
+export const DEFAULT_DEV_SETTINGS: DevSettings = {
+  perfOverlay: false,
+  directAdb: false,
+  lowLatency: true,
+  encoderTuning: "default",
+  anotherServer: false,
+  nativeVideo: false,
+  networkStream: true,
+};
+
+export interface PerfStats {
+  renderFps: number;
+  decodeFps: number;
+  packetsPerSec: number;
+  dropped: number;
+  bitrateKbps: number;
+  decodeMs: number;
+  pipelineMs: number;
+  deviceLagMs: number;
+  deviceLagMaxMs: number;
+  screenMs: number;
+  screenMaxMs: number;
+  decodeQueue: number;
+  width: number;
+  height: number;
+  codec: string;
 }
 
 export type MacroEvent =
@@ -40,8 +136,23 @@ export interface SavedMacro {
 
 export type FrameEvent =
   | { event: "config"; data: { codec: string; description: string } }
-  | { event: "packet"; data: { key: boolean; data: string; timestamp: number } }
-  | { event: "disconnected"; data: { reason: string } };
+  | { event: "packet"; data: { key: boolean; data: string; timestamp: number; recv_ms: number; capture_ms: number | null } }
+  | { event: "disconnected"; data: { reason: string } }
+  | { event: "native_size"; data: { width: number; height: number } }
+  | {
+      event: "native_stats";
+      data: {
+        fps: number;
+        decode_ms: number;
+        kbps: number;
+        lag_ms: number;
+        lag_max_ms: number;
+        lag_min_ms: number;
+        screen_ms: number;
+        screen_max_ms: number;
+        arrive_ms: number;
+      };
+    };
 
 export type Screen = "welcome" | "another";
 
@@ -82,19 +193,11 @@ export const CODEC_OPTIONS = [
   { value: "h264", label: "H.264" },
 ];
 
-export type QuickActionId = "record" | "mute" | "volume_up" | "volume_down" | "power" | "macro-toggle" | "rotate";
+export type QuickActionId = "screenshot" | "record" | "stats" | "mute" | "rotate";
 
-export const QUICK_ACTIONS: { id: QuickActionId; label: string }[] = [
-  { id: "record", label: "Record" },
-  { id: "mute", label: "Mute" },
-  { id: "volume_up", label: "Vol+" },
-  { id: "volume_down", label: "Vol-" },
-  { id: "power", label: "Power" },
-  { id: "macro-toggle", label: "Macro" },
-  { id: "rotate", label: "Rotate" },
-];
+export const QUICK_ACTION_ORDER: QuickActionId[] = ["screenshot", "record", "stats", "mute", "rotate"];
 
-export const DEFAULT_PINNED_ACTIONS: QuickActionId[] = [];
+export const DEFAULT_PINNED_ACTIONS: QuickActionId[] = ["record", "stats"];
 
 export interface AdaptiveTier {
   max_size: number;
@@ -110,3 +213,11 @@ export const ADAPTIVE_TIERS: AdaptiveTier[] = [
   { max_size: 1920, max_fps: 60, video_bit_rate: 24000000 },
   { max_size: 1920, max_fps: 120, video_bit_rate: 32000000 },
 ];
+
+export type View =
+  | { kind: "device"; serial: string }
+  | { kind: "tailnet"; address: string }
+  | { kind: "macros" }
+  | { kind: "recordings" }
+  | { kind: "notifications" }
+  | { kind: "agents" };
