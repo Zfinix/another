@@ -181,15 +181,15 @@ export function getDeviceDisplayName(device: Device): string {
 export type ThemePreference = "light" | "dark" | "auto";
 
 export const PRESETS: Record<string, Settings> = {
-  best: { max_size: 0, max_fps: 120, video_bit_rate: 32000000, video_codec: "h264", audio: false, adaptive: false },
+  best: { max_size: 1920, max_fps: 120, video_bit_rate: 24000000, video_codec: "h264", audio: false, adaptive: false },
   performance: { max_size: 720, max_fps: 30, video_bit_rate: 2000000, video_codec: "h264", audio: false, adaptive: false },
   balanced: { max_size: 1024, max_fps: 60, video_bit_rate: 8000000, video_codec: "h264", audio: false, adaptive: false },
   quality: { max_size: 1920, max_fps: 60, video_bit_rate: 24000000, video_codec: "h264", audio: false, adaptive: false },
 };
 
-const BEST_OVER_NETWORK: Partial<Settings> = { max_size: 1920, video_bit_rate: 16000000 };
+const BEST_OVER_NETWORK: Partial<Settings> = { video_bit_rate: 16000000 };
 
-/** The best stream for a phone: native size at its full refresh rate over USB, and a size Wi-Fi can carry otherwise. */
+/** The best stream for a phone: 1920 at its full refresh rate, since encoding native size costs about 20 ms more on real phones. */
 export function bestSettings(network: boolean): Settings {
   return network ? { ...PRESETS.best, ...BEST_OVER_NETWORK } : PRESETS.best;
 }
