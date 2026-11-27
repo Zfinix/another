@@ -557,10 +557,11 @@ pub fn parse_device_facts(output: &str) -> DeviceFacts {
     facts
 }
 
-/// Battery, storage, memory and display, read in one round trip.
+/// Battery, storage, memory and display. The refresh rate is read alongside, and cached after the first time.
 pub async fn device_facts(serial: &str) -> Result<DeviceFacts> {
-    let mut facts = parse_device_facts(&shell_text(serial, FACTS_COMMAND).await?);
-    facts.refresh_hz = peak_refresh_rate(serial).await.map(|rate| rate.round() as u32);
+    let (output, refresh) = tokio::join!(shell_text(serial, FACTS_COMMAND), peak_refresh_rate(serial));
+    let mut facts = parse_device_facts(&output?);
+    facts.refresh_hz = refresh.map(|rate| rate.round() as u32);
     Ok(facts)
 }
 
