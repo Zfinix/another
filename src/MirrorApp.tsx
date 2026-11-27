@@ -9,7 +9,7 @@ import type { Settings, Device, QuickActionId, DevSettings } from "./types";
 import { PRESETS, bestSettings, DEFAULT_PINNED_ACTIONS, DEFAULT_DEV_SETTINGS, QUICK_ACTION_ORDER } from "./types";
 import { isNetworkSerial } from "@/lib/utils";
 import { cleanError } from "@/lib/errors";
-import { announce, onStored, readStoredJson, store } from "@/lib/sync";
+import { announce, onStored, parseJson, readStoredJson, store } from "@/lib/sync";
 import {
   mirrorLabel,
   readMirrorBounds,
@@ -51,9 +51,8 @@ interface KeyedCommand extends CommandDef {
   shift?: boolean;
 }
 
-function readPins(): QuickActionId[] {
+function readPins(stored = localStorage.getItem("toolbar_pins")): QuickActionId[] {
   try {
-    const stored = localStorage.getItem("toolbar_pins");
     const pins: QuickActionId[] = stored ? JSON.parse(stored) : DEFAULT_PINNED_ACTIONS;
     return pins.filter((id) => QUICK_ACTION_ORDER.includes(id));
   } catch {
@@ -61,10 +60,17 @@ function readPins(): QuickActionId[] {
   }
 }
 
-/** The saved stream settings, or this phone's own best settings when the Best preset is on. */
-function readSettings(serial: string): Settings {
-  const stored = readStoredJson("stream_settings", PRESETS.balanced);
-  if ((localStorage.getItem("active_preset") ?? "best") !== "best") return stored;
+function parseSettings(json: string | null): Settings {
+  try {
+    return json ? { ...PRESETS.balanced, ...JSON.parse(json) } : PRESETS.balanced;
+  } catch {
+    return PRESETS.balanced;
+  }
+}
+
+/** The stream settings, or this phone's own best settings when the Best preset is on. */
+function settingsFor(serial: string, stored: Settings, preset: string | null): Settings {
+  if ((preset ?? "best") !== "best") return stored;
   return { ...bestSettings(isNetworkSerial(serial)), audio: stored.audio, adaptive_network: stored.adaptive_network };
 }
 
@@ -90,9 +96,11 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
   const { serial } = identity;
   const label = mirrorLabel(serial);
   const device: Device = useMemo(() => ({ serial, model: identity.model, state: "device" }), [serial, identity.model]);
-  const [settings, setSettings] = useState<Settings>(() => readSettings(serial));
+  const storedSettings = useRef(parseSettings(localStorage.getItem("stream_settings")));
+  const preset = useRef(localStorage.getItem("active_preset"));
+  const [settings, setSettings] = useState<Settings>(() => settingsFor(serial, storedSettings.current, preset.current));
   const [devSettings, setDevSettings] = useState<DevSettings>(() => readStoredJson("dev_settings", DEFAULT_DEV_SETTINGS));
-  const [pins, setPins] = useState<QuickActionId[]>(readPins);
+  const [pins, setPins] = useState<QuickActionId[]>(() => readPins());
   const [stayAwake, setStayAwake] = useState(() => localStorage.getItem("stay_awake") === "true");
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [showCommandBar, setShowCommandBar] = useState(false);
@@ -227,9 +235,13 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
     connectToDevice(device, settingsRef.current, false, devSettingsRef.current);
   }, []);
 
-  useEffect(() => onStored("stream_settings", () => {
+  // The values come from the events themselves: localStorage reaches other windows asynchronously.
+  useEffect(() => onStored("active_preset", (value) => { preset.current = value; }), []);
+
+  useEffect(() => onStored("stream_settings", (value) => {
+    storedSettings.current = parseSettings(value);
     const prev = settingsRef.current;
-    const next = readSettings(serial);
+    const next = settingsFor(serial, storedSettings.current, preset.current);
     setSettings(next);
     if (!next.adaptive) adaptiveRef.current.disableAdaptive();
     if (!connectedRef.current) return;
@@ -237,16 +249,16 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
     if (changed && !applyLiveRef.current(prev, next)) scheduleReconnectRef.current?.(next);
   }), []);
 
-  useEffect(() => onStored("dev_settings", () => {
+  useEffect(() => onStored("dev_settings", (value) => {
     const prev = devSettingsRef.current;
-    const next = readStoredJson("dev_settings", DEFAULT_DEV_SETTINGS);
+    const next = parseJson(value, DEFAULT_DEV_SETTINGS);
     setDevSettings(next);
     if (connectedRef.current && RECONNECT_DEV_KEYS.some((key) => next[key] !== prev[key])) {
       scheduleReconnectRef.current?.(settingsRef.current);
     }
   }), []);
 
-  useEffect(() => onStored("toolbar_pins", () => setPins(readPins())), []);
+  useEffect(() => onStored("toolbar_pins", (value) => setPins(readPins(value))), []);
 
   useEffect(() => onStored("stay_awake", (value) => setStayAwake(value === "true")), []);
 

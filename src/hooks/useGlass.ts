@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { onStored, readStoredJson, store } from "@/lib/sync";
+import { onStored, parseJson, readStoredJson, store } from "@/lib/sync";
 
 const STORAGE_KEY = "window_glass";
 const DEFAULT_GLASS = { opacity: 72, blur: 40 };
@@ -20,7 +20,7 @@ export function useGlass() {
     root.style.setProperty("--glass-blur", `${(glass.blur * MAX_GLASS_BLUR_PX) / 100}px`);
   }, [glass]);
 
-  useEffect(() => onStored(STORAGE_KEY, () => setGlassState(readStoredJson(STORAGE_KEY, DEFAULT_GLASS))), []);
+  useEffect(() => onStored(STORAGE_KEY, (value) => setGlassState(parseJson(value, DEFAULT_GLASS))), []);
 
   const setGlass = (next: Glass) => {
     setGlassState(next);

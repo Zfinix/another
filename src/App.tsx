@@ -36,7 +36,7 @@ import { ToastContainer } from "./components/ToastContainer";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { WhatsNew } from "./components/WhatsNew";
 import { LATEST_NEWS, dismissNews, isNewsDismissed, type News } from "@/lib/news";
-import { onAnnounced, onStored, readStoredJson, store } from "@/lib/sync";
+import { onAnnounced, onStored, parseJson, store } from "@/lib/sync";
 import {
   mirrorLabel,
   openMirror,
@@ -149,7 +149,7 @@ function App() {
   const refreshRecordingsRef = useRef(refreshRecordings);
   refreshRecordingsRef.current = refreshRecordings;
   useEffect(() => onAnnounced("recordings", () => refreshRecordingsRef.current()), []);
-  useEffect(() => onStored("dev_settings", () => setDevSettings(readStoredJson("dev_settings", DEFAULT_DEV_SETTINGS))), []);
+  useEffect(() => onStored("dev_settings", (value) => setDevSettings(parseJson(value, DEFAULT_DEV_SETTINGS))), []);
 
   const toggleAlwaysOnTop = useCallback(async () => {
     const next = !alwaysOnTop;
@@ -206,7 +206,7 @@ function App() {
     if (key !== "audio" && key !== "adaptive" && key !== "adaptive_network") {
       next.adaptive = false;
       setActivePreset("");
-      localStorage.setItem("active_preset", "");
+      store("active_preset", "");
     }
     setSettings(next);
     store("stream_settings", JSON.stringify(next));
@@ -234,9 +234,9 @@ function App() {
     setSettings(nextSettings);
     setDevSettings(nextDev);
     setActivePreset("");
+    store("active_preset", "");
     store("stream_settings", JSON.stringify(nextSettings));
     store("dev_settings", JSON.stringify(nextDev));
-    localStorage.setItem("active_preset", "");
     return { settings: nextSettings, dev: nextDev };
   }, []);
 
@@ -251,8 +251,8 @@ function App() {
     const next = presetSettings(name, activeSerial ?? undefined);
     setSettings(next);
     setActivePreset(name);
+    store("active_preset", name);
     store("stream_settings", JSON.stringify(next));
-    localStorage.setItem("active_preset", name);
   };
 
   const openMirrorFor = useCallback((device: Device) => {

@@ -39,10 +39,14 @@ export function onStored(key: string, handle: (value: string | null) => void): (
   };
 }
 
+/** Reads a stored object over its defaults. Use the event's value in `onStored` handlers instead. */
 export function readStoredJson<T>(key: string, fallback: T): T {
+  return parseJson(localStorage.getItem(key), fallback);
+}
+
+export function parseJson<T>(value: string | null, fallback: T): T {
   try {
-    const stored = localStorage.getItem(key);
-    return stored ? { ...fallback, ...JSON.parse(stored) } : fallback;
+    return value ? { ...fallback, ...JSON.parse(value) } : fallback;
   } catch {
     return fallback;
   }
