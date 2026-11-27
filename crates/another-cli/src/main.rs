@@ -20,14 +20,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Show the connected device, stream state and current profile
+    /// Show the phones being mirrored, their stream state and the current profile
     Status,
     /// List the devices Another can see
     Devices,
-    /// Connect to a device by serial
+    /// Mirror a device by serial, in its own window
     Connect { serial: String },
-    /// Disconnect the current device
-    Disconnect,
+    /// Stop mirroring one device, or every device when no serial is given
+    Disconnect { serial: Option<String> },
     /// Change settings, such as `another set max_size=1920 native_video=true`
     Set {
         #[arg(required = true, value_name = "KEY=VALUE")]
@@ -135,10 +135,10 @@ fn run_connected(client: &Client, command: Command) -> Result<()> {
         Command::Status => print_json(&client.get("/status")?),
         Command::Devices => {
             let status = client.get("/status")?;
-            let connected = status["ui"]["connected"].as_str().unwrap_or_default().to_string();
+            let mirroring = sessions(&status["ui"]);
             for device in status["ui"]["devices"].as_array().cloned().unwrap_or_default() {
                 let serial = device["serial"].as_str().unwrap_or_default();
-                let marker = if serial == connected { "*" } else { " " };
+                let marker = if mirroring.iter().any(|session| session["serial"].as_str() == Some(serial)) { "*" } else { " " };
                 println!("{} {:<24} {:<24} {}", marker, serial, device["model"].as_str().unwrap_or_default(), device["state"].as_str().unwrap_or_default());
             }
             Ok(())
@@ -149,8 +149,12 @@ fn run_connected(client: &Client, command: Command) -> Result<()> {
             println!("Connected to {}", serial);
             Ok(())
         }
-        Command::Disconnect => {
-            client.post("/command", &json!({ "action": "disconnect" }))?;
+        Command::Disconnect { serial } => {
+            let mut command = json!({ "action": "disconnect" });
+            if let Some(serial) = serial {
+                command["serial"] = json!(serial);
+            }
+            client.post("/command", &command)?;
             Ok(())
         }
         Command::Set { assignments, connect } => {
@@ -206,15 +210,27 @@ fn apply(client: &Client, profile: &Value, connect: Option<&str>) -> Result<()> 
     Ok(())
 }
 
+/// The phones being mirrored. Older apps report one `connected` phone instead of a list.
+fn sessions(ui: &Value) -> Vec<Value> {
+    if let Some(list) = ui["sessions"].as_array() {
+        return list.clone();
+    }
+    ui["connected"]
+        .as_str()
+        .map(|serial| vec![json!({ "serial": serial, "streamReady": ui["streamReady"] })])
+        .unwrap_or_default()
+}
+
 /// Waits for the UI to show a live stream, after the reconnect a profile change triggers.
 fn wait_until_streaming(client: &Client, serial: Option<&str>) -> Result<()> {
     std::thread::sleep(Duration::from_millis(1200));
     let started = Instant::now();
     loop {
         let ui = client.get("/status")?["ui"].clone();
-        let connected = ui["connected"].as_str();
-        let right_device = serial.map_or(connected.is_some(), |s| connected == Some(s));
-        if right_device && ui["streamReady"].as_bool() == Some(true) {
+        let streaming = sessions(&ui).into_iter().any(|session| {
+            session["streamReady"].as_bool() == Some(true) && serial.is_none_or(|s| session["serial"].as_str() == Some(s))
+        });
+        if streaming {
             return Ok(());
         }
         if started.elapsed() > CONNECT_TIMEOUT {
