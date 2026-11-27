@@ -136,6 +136,7 @@ button.row:disabled{cursor:default}
 .cmd-group:not([hidden]) ~ .cmd-group:not([hidden]){margin-top:8px}
 .cmd-item[data-selected=true]{background:var(--default)}
 
+html.native-video,html.native-video body{background:transparent}
 .app-window.native{background:none}
 .native-video-frame{box-shadow:0 0 0 100vmax var(--glass)}
 .native-video-hole{box-shadow:0 0 0 100vmax #0a0a0b}
