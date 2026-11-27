@@ -13,8 +13,7 @@ function InputOTPRoot({ className, children, disabled, pattern = REGEXP_ONLY_DIG
       {...props}
       pattern={pattern}
       disabled={disabled}
-      containerClassName={cn("input-otp", className)}
-      data-disabled={disabled ? "true" : undefined}
+      containerClassName={cn("input-otp", disabled && "input-otp--disabled", className)}
     >
       {children}
     </OTPInput>
