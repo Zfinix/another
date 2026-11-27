@@ -6,7 +6,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { downloadDir } from "@tauri-apps/api/path";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { Settings, Device, QuickActionId, DevSettings, Profile, RemoteCommand, View, TailnetPeer } from "./types";
-import { PRESETS, DEFAULT_PINNED_ACTIONS, DEFAULT_DEV_SETTINGS, QUICK_ACTION_ORDER, setDeviceNickname } from "./types";
+import { PRESETS, bestSettings, DEFAULT_PINNED_ACTIONS, DEFAULT_DEV_SETTINGS, QUICK_ACTION_ORDER, setDeviceNickname } from "./types";
 import { isNetworkSerial } from "@/lib/utils";
 import { describeFacts, deviceKind, deviceMaker, deviceName, getDeviceInfo, hasDeviceInfo, peerMaker, prettyModel, resolutionLabel, setDeviceInfo, KIND_ICON, KIND_PATH, type DeviceInfo } from "@/lib/devices";
 import { useTheme } from "./hooks/useTheme";
@@ -52,7 +52,7 @@ const LIVE_SIZE_DEBOUNCE_MS = 300;
 const RECONNECT_DEV_KEYS: (keyof DevSettings)[] = ["directAdb", "lowLatency", "encoderTuning", "anotherServer", "nativeVideo", "networkStream"];
 const STAY_ON_ALL_SOURCES = "7";
 const MAX_GLASS_BLUR_PX = 60;
-const PRESET_LABELS: Record<string, string> = { performance: "Performance", balanced: "Balanced", quality: "Quality" };
+const PRESET_LABELS: Record<string, string> = { best: "Best for this phone", performance: "Performance", balanced: "Balanced", quality: "Quality" };
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -92,7 +92,7 @@ function App() {
   const [showCommandBar, setShowCommandBar] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   const [settings, setSettings] = useState<Settings>(() => readJson("stream_settings", PRESETS.balanced));
-  const [activePreset, setActivePreset] = useState(() => localStorage.getItem("active_preset") || "balanced");
+  const [activePreset, setActivePreset] = useState(() => localStorage.getItem("active_preset") ?? "best");
   const [devSettings, setDevSettings] = useState<DevSettings>(() => readJson("dev_settings", DEFAULT_DEV_SETTINGS));
   const [pins, setPins] = useState<QuickActionId[]>(() => readList<QuickActionId>("toolbar_pins", DEFAULT_PINNED_ACTIONS).filter((id) => QUICK_ACTION_ORDER.includes(id)));
   const [networkPrefs, setNetworkPrefsState] = useState<NetworkPrefs>(() => readJson("network_prefs", { autoReconnect: true, showTailnet: true }));
@@ -310,8 +310,21 @@ function App() {
 
   const profiles = useProfiles({ settings, devSettings, onApply: applyProfile, showToast });
 
+  const presetSettings = (name: string, serial?: string) => {
+    const base = name === "best" ? bestSettings(!!serial && isNetworkSerial(serial)) : PRESETS[name];
+    return { ...base, audio: settings.audio, adaptive_network: settings.adaptive_network };
+  };
+
+  const startSettings = (device: Device) => {
+    if (activePreset !== "best") return settings;
+    const next = presetSettings("best", device.serial);
+    setSettings(next);
+    localStorage.setItem("stream_settings", JSON.stringify(next));
+    return next;
+  };
+
   const applyPreset = (name: string) => {
-    const next = { ...PRESETS[name], audio: settings.audio };
+    const next = presetSettings(name, connectedDevice?.serial);
     setSettings(next);
     setActivePreset(name);
     localStorage.setItem("stream_settings", JSON.stringify(next));
@@ -473,8 +486,8 @@ function App() {
     if (connectingSerial || device.state !== "device") return;
     connection.clearDropped();
     setView({ kind: "device", serial: device.serial });
-    connectToDevice(device, settings);
-  }, [connectingSerial, connectToDevice, settings, connection.clearDropped]);
+    connectToDevice(device, startSettings(device));
+  }, [connectingSerial, connectToDevice, settings, activePreset, connection.clearDropped]);
 
   const toggleWifi = async (device: Device) => {
     setBusySerial(device.serial);
@@ -532,7 +545,8 @@ function App() {
     try {
       await invoke("wifi_connect", { address: peer.address });
       await refreshDevices();
-      connectToDevice({ serial: peer.address, model: peer.name, state: "device" }, settings);
+      const peerDevice = { serial: peer.address, model: peer.name, state: "device" };
+      connectToDevice(peerDevice, startSettings(peerDevice));
     } catch {
       showToast(`Could not reach ${peer.name} over the tailnet`, "error", { detail: "Connect it by USB once and turn on Wi-Fi debugging" });
     } finally {
@@ -669,8 +683,11 @@ function App() {
     return KIND_PATH[kind];
   };
 
-  const streamSummary = (network: boolean) =>
-    [resolutionLabel(settings.max_size), `${settings.max_fps} fps`, settings.adaptive || (network && settings.adaptive_network !== false) ? "Adaptive" : null].filter(Boolean).join(" · ");
+  const streamSummary = (network: boolean, refreshHz?: number | null) => {
+    const shown = activePreset === "best" ? bestSettings(network) : settings;
+    const fps = activePreset === "best" ? (refreshHz ? `${refreshHz} fps` : "Full frame rate") : `${shown.max_fps} fps`;
+    return [resolutionLabel(shown.max_size), fps, shown.adaptive || (network && settings.adaptive_network !== false) ? "Adaptive" : null].filter(Boolean).join(" · ");
+  };
 
   const profileOptions = [
     ...(activePreset ? [] : [{ value: "custom", label: "Your settings" }]),
@@ -757,7 +774,7 @@ function App() {
           facts={deviceFacts ? describeFacts(deviceFacts) : undefined}
           connection={{ icon: KIND_ICON[kind], value: pathLabel(selectedDevice), healthy: true }}
           latency={latency ? `${latency} ms` : "Not measured"}
-          stream={streamSummary(kind === "wifi")}
+          stream={streamSummary(kind === "wifi", deviceFacts?.refresh_hz)}
           profile={profileControl}
           audio={{ checked: settings.audio, onChange: (on) => updateSetting("audio", on) }}
           awake={{ checked: stayAwake, onChange: setStayAwake }}
@@ -829,7 +846,7 @@ function App() {
           alwaysOnTop={alwaysOnTop}
           onToggleAlwaysOnTop={toggleAlwaysOnTop}
           onOpenSettings={() => openSettings()}
-          reconnecting={connectingSerial && connection.streamReady ? { message: "Reconnecting", action: usbTwin ? { label: "Use USB", run: () => connectToDevice(usbTwin, settings) } : undefined } : null}
+          reconnecting={connectingSerial && connection.streamReady ? { message: "Reconnecting", action: usbTwin ? { label: "Use USB", run: () => connectToDevice(usbTwin, startSettings(usbTwin)) } : undefined } : null}
           onToggleStats={toggleStats}
           onToggleRecording={toggleRecording}
           onToggleMacroRecording={macro.toggleRecording}
