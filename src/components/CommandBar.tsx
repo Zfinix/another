@@ -12,7 +12,7 @@ export interface CommandDef {
   icon: IconName;
   meta?: string;
   /** Extra words the search matches but the row does not show. */
-  keywords?: string;
+  keywords?: string[];
   hidden?: boolean;
   action: () => void;
 }
@@ -47,7 +47,7 @@ export function CommandBar({ open, onOpenChange, commands }: CommandBarProps) {
 
   return (
     <AppDialog open={open} onOpenChange={onOpenChange} label="Command bar" top={144} style={{ width: "100%", maxWidth: 576 }}>
-      <Command label="Command bar" loop className="flex flex-col gap-2" filter={(value, search) => (value.toLowerCase().includes(search.trim().toLowerCase()) ? 1 : 0)}>
+      <Command label="Command bar" loop className="flex flex-col gap-2" filter={(value, search, keywords) => ([value, ...(keywords ?? [])].join(" ").toLowerCase().includes(search.trim().toLowerCase()) ? 1 : 0)}>
         <label className="flex items-center gap-2 px-2" style={{ height: 40, color: "var(--muted)" }}>
           <Icon name="search" />
           <Command.Input value={query} onValueChange={setQuery} placeholder="Search commands" aria-label="Search commands" className="flex-1 min-w-0 bg-transparent outline-none" style={{ fontSize: 15, color: "var(--foreground)" }} autoFocus />
@@ -63,7 +63,8 @@ export function CommandBar({ open, onOpenChange, commands }: CommandBarProps) {
                 .map((c) => (
                   <Command.Item
                     key={c.id}
-                    value={`${c.label} ${c.section} ${c.keywords ?? ""}`}
+                    value={`${c.label} ${c.section}`}
+                    keywords={c.keywords}
                     className="item cmd-item"
                     onSelect={() => {
                       onOpenChange(false);

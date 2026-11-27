@@ -553,7 +553,7 @@ function App() {
     { id: "stats", label: devSettings.perfOverlay ? "Hide stream stats" : "Show stream stats", icon: "stats", keys: [MOD, "I"], key: "i", section: "Phone", action: toggleStats },
     { id: "cmdbar", label: "Command bar", icon: "search", keys: [MOD, "K"], key: "k", section: "App", action: () => setShowCommandBar((s) => !s) },
     { id: "settings", label: "Settings", icon: "settings", keys: [MOD, ","], key: ",", section: "App", action: () => openSettings() },
-    { id: "connect", label: "Connect a phone", icon: "qr", keywords: "qr code pair wifi address", keys: [], section: "App", action: () => setShowConnect(true) },
+    { id: "connect", label: "Connect a phone", icon: "qr", keywords: ["qr", "code", "pair", "wifi", "address"], keys: [], section: "App", action: () => setShowConnect(true) },
     { id: "whats-new", label: "What's new", icon: "sparkle", keys: [], section: "App", action: () => setShowNews(true) },
     { id: "refresh", label: "Refresh devices", icon: "refresh", keys: [], section: "App", action: () => { refreshDevices(); tailnet.refresh(); } },
     { id: "theme", label: "Change the theme", icon: "sun", keys: [MOD, "T"], key: "t", section: "App", action: cycleTheme },
