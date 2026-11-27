@@ -928,6 +928,28 @@ pub async fn phone_notifications(
 }
 
 #[tauri::command]
+pub async fn app_icons(serial: String, packages: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
+    adb::app_icons(&serial, &packages).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn notify_phone(
+    app: AppHandle,
+    title: String,
+    subtitle: String,
+    body: String,
+    package: String,
+    icon: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::phone_notify::show(&app, &title, &subtitle, &body, &package, icon.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn open_phone_app(serial: String, package: String) -> Result<(), String> {
     adb::launch_app(&serial, &package).await.map_err(|e| e.to_string())
 }

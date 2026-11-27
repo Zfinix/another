@@ -22,6 +22,9 @@ a{color:inherit;text-decoration:none}
 .gi::after{content:"";position:absolute;inset:.5px .5px auto;height:40%;z-index:-1;background:linear-gradient(180deg,rgba(255,255,255,.16),transparent);-webkit-mask:var(--sq) top/100% 250% no-repeat;mask:var(--sq) top/100% 250% no-repeat;pointer-events:none}
 .gi .fi{width:16px;height:16px}
 .gi--md{width:36px;height:36px;font-size:14px;font-weight:600;text-shadow:0 1px 1px rgba(0,0,0,.25)}
+.gi.app-icon{background:transparent}
+.gi.app-icon::before,.gi.app-icon::after{display:none}
+.gi.app-icon img{width:100%;height:100%;display:block}
 .gi--md .fi{width:18px;height:18px}
 .gi--lg{width:48px;height:48px}
 .gi--lg .fi{width:24px;height:24px}

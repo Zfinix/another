@@ -30,7 +30,7 @@ import { EmptyState, TrustState, StartingState, DisconnectedState, type StartSte
 import { MacrosView } from "./components/MacrosView";
 import { RecordingsView, type RecordingFile } from "./components/RecordingsView";
 import { AgentsView } from "./components/AgentsView";
-import { NotificationsView, NotificationBanners } from "./components/NotificationsView";
+import { NotificationsView } from "./components/NotificationsView";
 import { MirrorScreen } from "./components/MirrorScreen";
 import { SettingsDialog, type SettingsPane, type NetworkPrefs } from "./components/SettingsDialog";
 import { ConnectDialog, rememberAddress } from "./components/ConnectDialog";
@@ -469,10 +469,6 @@ function App() {
     showToast("Code copied", "success");
   };
 
-  const openOnPhone = (pkg: string) => {
-    if (onlineDevice) invoke("open_phone_app", { serial: onlineDevice.serial, package: pkg }).catch((e) => showToast("Could not open the app", "error", { detail: `${e}` }));
-  };
-
   const mirror = useCallback((device: Device) => {
     if (connectingSerial || device.state !== "device") return;
     connection.clearDropped();
@@ -710,6 +706,7 @@ function App() {
         <NotificationsView
           deviceName={deviceName(onlineDevice)}
           items={notifications.items}
+          icons={notifications.icons}
           systemCenter={notifications.systemCenter}
           onSystemCenter={notifications.setSystemCenter}
           offerCodes={notifications.offerCodes}
@@ -911,7 +908,6 @@ function App() {
         showToast={showToast}
       />
       <CommandBar open={showCommandBar} onOpenChange={setShowCommandBar} commands={commands} />
-      <NotificationBanners banners={notifications.banners} onDismiss={notifications.dismissBanner} onCopyCode={copyCode} onOpen={openOnPhone} />
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </>
   );

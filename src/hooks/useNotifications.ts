@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 
 export interface PhoneNotification {
   key: string;
@@ -10,14 +10,7 @@ export interface PhoneNotification {
   posted_ms: number;
 }
 
-export interface Banner extends PhoneNotification {
-  device: string;
-  code: string | null;
-}
-
 const POLL_MS = 4000;
-const BANNER_MS = 8000;
-const MAX_BANNERS = 3;
 const CODE_PATTERN = /(?:code|otp|pin|passcode|verification|verify|sign-in|login)/i;
 const CODE_DIGITS = /\b(\d{4,8})\b/;
 
@@ -58,6 +51,25 @@ export function timeAgo(ms: number, now = Date.now()): string {
   return hours < 24 ? `${hours} h` : `${Math.floor(hours / 24)} d`;
 }
 
+const ICONS_KEY = "app_icons";
+
+function readIcons(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(ICONS_KEY) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+async function notifyMac(serial: string, n: PhoneNotification, deviceName: string, cached?: string) {
+  let icon = cached?.split(",")[1] ?? null;
+  if (!icon) {
+    const found = await invoke<Record<string, string>>("app_icons", { serial, packages: [n.package] }).catch(() => ({} as Record<string, string>));
+    icon = found[n.package] ?? null;
+  }
+  await invoke("notify_phone", { title: n.title, subtitle: `${appName(n.package)} · ${deviceName}`, body: n.text, package: n.package, icon }).catch(() => { });
+}
+
 function readFlag(key: string, fallback: boolean) {
   const stored = localStorage.getItem(key);
   return stored === null ? fallback : stored === "true";
@@ -70,9 +82,12 @@ interface Options {
 
 export function useNotifications({ serial, deviceName }: Options) {
   const [items, setItems] = useState<PhoneNotification[]>([]);
-  const [banners, setBanners] = useState<Banner[]>([]);
   const [systemCenter, setSystemCenterState] = useState(() => readFlag("notify_system", true));
   const [offerCodes, setOfferCodesState] = useState(() => readFlag("notify_codes", true));
+  const [icons, setIcons] = useState<Record<string, string>>(readIcons);
+  const asked = useRef<Set<string>>(new Set());
+  const iconsRef = useRef(icons);
+  iconsRef.current = icons;
   const seen = useRef<Set<string> | null>(null);
   const optionsRef = useRef({ systemCenter, offerCodes, deviceName });
   optionsRef.current = { systemCenter, offerCodes, deviceName };
@@ -90,14 +105,9 @@ export function useNotifications({ serial, deviceName }: Options) {
     localStorage.setItem("notify_codes", String(on));
   }, []);
 
-  const dismissBanner = useCallback((key: string) => {
-    setBanners((prev) => prev.filter((b) => b.key !== key));
-  }, []);
-
   useEffect(() => {
     seen.current = null;
     setItems([]);
-    setBanners([]);
     if (!serial) return;
     let stopped = false;
 
@@ -111,13 +121,8 @@ export function useNotifications({ serial, deviceName }: Options) {
         if (!known) return;
         const fresh = list.filter((n) => !known.has(n.key));
         if (fresh.length === 0) return;
-        const { systemCenter: toCenter, offerCodes: codes, deviceName: name } = optionsRef.current;
-        const next = fresh.map((n) => ({ ...n, device: name, code: codes ? oneTimeCode(n) : null }));
-        setBanners((prev) => [...next, ...prev].slice(0, MAX_BANNERS));
-        next.forEach((b) => setTimeout(() => dismissBanner(b.key), BANNER_MS));
-        if (toCenter && !document.hasFocus()) {
-          next.forEach((n) => sendNotification({ title: `${appName(n.package)} · ${n.title}`, body: n.text || name }));
-        }
+        const { systemCenter: toCenter, deviceName: name } = optionsRef.current;
+        if (toCenter) fresh.forEach((n) => notifyMac(serial, n, name, iconsRef.current[n.package]));
       } catch { }
     };
 
@@ -127,7 +132,27 @@ export function useNotifications({ serial, deviceName }: Options) {
       stopped = true;
       clearInterval(timer);
     };
-  }, [serial, dismissBanner]);
+  }, [serial]);
 
-  return { items, banners, dismissBanner, systemCenter, setSystemCenter, offerCodes, setOfferCodes };
+  useEffect(() => {
+    if (!serial) return;
+    const missing = [...new Set(items.map((n) => n.package))].filter((pkg) => !icons[pkg] && !asked.current.has(pkg));
+    if (missing.length === 0) return;
+    missing.forEach((pkg) => asked.current.add(pkg));
+    invoke<Record<string, string>>("app_icons", { serial, packages: missing })
+      .then((found) => {
+        if (Object.keys(found).length === 0) return;
+        setIcons((prev) => {
+          const next = { ...prev };
+          for (const [pkg, png] of Object.entries(found)) next[pkg] = `data:image/png;base64,${png}`;
+          try {
+            localStorage.setItem(ICONS_KEY, JSON.stringify(next));
+          } catch { }
+          return next;
+        });
+      })
+      .catch(() => { });
+  }, [serial, items, icons]);
+
+  return { items, systemCenter, setSystemCenter, offerCodes, setOfferCodes, icons };
 }

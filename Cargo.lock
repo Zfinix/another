@@ -13,6 +13,7 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "getrandom 0.2.17",
+ "mac-notification-sys",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-media",
