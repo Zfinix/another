@@ -46,6 +46,8 @@ pub struct AppState {
     /// The mirror window whose phone is heard; the others stay silent.
     pub audio_focus: Arc<Mutex<Option<String>>>,
     pub mcp: Arc<Mutex<McpServerState>>,
+    /// Phones whose `stay_on_while_plugged_in` setting Another changed, with the value to put back.
+    pub stay_on: Arc<Mutex<HashMap<String, String>>>,
     ports: Arc<std::sync::Mutex<HashSet<u16>>>,
 }
 
@@ -58,6 +60,7 @@ impl AppState {
                 cancel: None,
                 port: 7070,
             })),
+            stay_on: Arc::new(Mutex::new(HashMap::new())),
             ports: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }

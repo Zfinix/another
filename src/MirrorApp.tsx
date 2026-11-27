@@ -43,9 +43,7 @@ const MAIN_LABEL = "main";
 const LIVE_KEYS: (keyof Settings)[] = ["video_bit_rate", "max_size", "max_fps"];
 const LIVE_SIZE_DEBOUNCE_MS = 300;
 const RECONNECT_DEV_KEYS: (keyof DevSettings)[] = ["directAdb", "lowLatency", "encoderTuning", "anotherServer", "nativeVideo", "networkStream"];
-const STAY_ON_ALL_SOURCES = "7";
 const BOUNDS_SAVE_MS = 400;
-const RECORDING_SAVED_MS = 1500;
 const MIN_VIEW_WIDTH = 280;
 
 interface KeyedCommand extends CommandDef {
@@ -162,6 +160,7 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
       scheduleReconnectRef.current?.(next);
     },
     onRecordEvent: macro.recordEvent,
+    onRecordingSaved: () => announce("recordings"),
     onDropped: (reason) => {
       emitTo(MAIN_LABEL, MIRROR_DROPPED_EVENT, { serial, model: identity.model, reason }).catch(() => { });
       closeWindow();
@@ -249,30 +248,13 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
 
   useEffect(() => onStored("toolbar_pins", () => setPins(readPins())), []);
 
-  const stayOnPrevious = useRef<string | null>(null);
-  const restoreStayOn = useCallback(async () => {
-    const previous = stayOnPrevious.current;
-    stayOnPrevious.current = null;
-    if (previous !== null) await invoke("set_stay_on", { serial, value: previous }).catch(() => { });
-  }, [serial]);
+  useEffect(() => onStored("stay_awake", (value) => setStayAwake(value === "true")), []);
 
-  useEffect(() => onStored("stay_awake", (value) => {
-    const on = value === "true";
-    setStayAwake(on);
-    if (!on) restoreStayOn();
-  }), [restoreStayOn]);
-
+  // The backend puts the phone's setting back when its last mirror session ends.
   useEffect(() => {
-    if (!connection.streamReady || !stayAwake || stayOnPrevious.current !== null) return;
-    invoke<string>("set_stay_on", { serial, value: STAY_ON_ALL_SOURCES })
-      .then((value) => { stayOnPrevious.current = value === "null" ? "0" : value; })
-      .catch(() => { });
+    if (!connection.streamReady) return;
+    invoke("set_stay_on", { serial, on: stayAwake }).catch(() => { });
   }, [connection.streamReady, stayAwake, serial]);
-
-  useEffect(() => {
-    const unlisten = getCurrentWindow().onCloseRequested(() => restoreStayOn());
-    return () => { unlisten.then((fn) => fn()); };
-  }, [restoreStayOn]);
 
   useEffect(() => {
     const win = getCurrentWindow();
@@ -346,11 +328,7 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
     store("toolbar_pins", JSON.stringify(next));
   };
 
-  const toggleRecording = () => {
-    const wasRecording = connection.recording;
-    connection.toggleRecording();
-    if (wasRecording) setTimeout(() => announce("recordings"), RECORDING_SAVED_MS);
-  };
+  const toggleRecording = connection.toggleRecording;
 
   const rotate = () => { invoke("rotate_device").catch((e) => showToast("Could not rotate the screen", "error", { detail: `${e}` })); };
   const toggleStats = () => updateDevSetting("perfOverlay", !devSettings.perfOverlay);

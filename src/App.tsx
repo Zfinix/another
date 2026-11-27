@@ -6,7 +6,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getVersion } from "@tauri-apps/api/app";
 import { downloadDir } from "@tauri-apps/api/path";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { Settings, Device, DevSettings, Profile, RemoteCommand, View, TailnetPeer } from "./types";
+import type { Settings, Device, DevSettings, Profile, LinkCommand, RemoteCommand, View, TailnetPeer } from "./types";
 import { PRESETS, bestSettings, DEFAULT_DEV_SETTINGS, setDeviceNickname } from "./types";
 import { isNetworkSerial } from "@/lib/utils";
 import { describeFacts, deviceKind, deviceMaker, deviceName, getDeviceInfo, hasDeviceInfo, peerMaker, prettyModel, resolutionLabel, setDeviceInfo, KIND_ICON, KIND_PATH, type DeviceInfo } from "@/lib/devices";
@@ -19,7 +19,7 @@ import { useNotifications } from "./hooks/useNotifications";
 import { useMacro } from "./hooks/useMacro";
 import { useDeviceFacts } from "./hooks/useDeviceFacts";
 import { useGlass } from "./hooks/useGlass";
-import { useProfiles, sanitizeProfile } from "./hooks/useProfiles";
+import { useProfiles, sanitizeProfile, describeProfile } from "./hooks/useProfiles";
 import { useUpdater } from "./hooks/useUpdater";
 import { useWindowDrag } from "./hooks/useWindowDrag";
 import { Sidebar, type DeviceActions } from "./components/Sidebar";
@@ -33,6 +33,7 @@ import { SettingsDialog, type SettingsPane, type NetworkPrefs } from "./componen
 import { ConnectDialog, rememberAddress } from "./components/ConnectDialog";
 import { CommandBar, type CommandDef } from "./components/CommandBar";
 import { ToastContainer } from "./components/ToastContainer";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { WhatsNew } from "./components/WhatsNew";
 import { LATEST_NEWS, dismissNews, isNewsDismissed, type News } from "@/lib/news";
 import { onAnnounced, onStored, readStoredJson, store } from "@/lib/sync";
@@ -264,9 +265,25 @@ function App() {
     openMirrorFor(device);
   };
 
+  const [linkQueue, setLinkQueue] = useState<LinkCommand[]>([]);
+  const linkCommand = linkQueue[0] ?? null;
+
+  const describeLink = (command: LinkCommand): string => {
+    const serial = command.action === "connect" ? command.serial : command.connect;
+    const device = devicesRef.current.find((d) => d.serial === serial);
+    const changes = command.action === "apply" ? describeProfile(command.profile) : [];
+    const steps = [
+      ...(changes.length ? [`change ${changes.join(", ")}`] : []),
+      ...(serial ? [`connect to ${device ? `${deviceName(device)} (${serial})` : serial}`] : []),
+    ];
+    return `A link wants to ${steps.join(" and ")}. Only allow links you trust.`;
+  };
+
   const remoteHandlerRef = useRef<(command: RemoteCommand) => void>(() => { });
   remoteHandlerRef.current = (command) => {
-    if (command.action === "apply") {
+    if (command.action === "link") {
+      setLinkQueue((queue) => [...queue, command.command]);
+    } else if (command.action === "apply") {
       applyProfile(command.profile);
       if (command.connect) connectBySerial(command.connect);
     } else if (command.action === "connect") {
@@ -384,7 +401,7 @@ function App() {
 
   const activeDevice = activeSerial ? devices.find((d) => d.serial === activeSerial) ?? null : null;
   const onlineDevice = activeDevice ?? (selectedDevice?.state === "device" ? selectedDevice : devices.find((d) => d.state === "device") ?? null);
-  const notifications = useNotifications({ serial: onlineDevice?.serial ?? null, deviceName: onlineDevice ? deviceName(onlineDevice) : "" });
+  const notifications = useNotifications({ serial: onlineDevice?.serial ?? null, deviceName: onlineDevice ? deviceName(onlineDevice) : "", mirroring: !!onlineDevice && !!mirrors[onlineDevice.serial] });
 
   const copyCode = (code: string) => {
     navigator.clipboard.writeText(code);
@@ -752,6 +769,15 @@ function App() {
         showToast={showToast}
       />
       <CommandBar open={showCommandBar} onOpenChange={setShowCommandBar} commands={commands} />
+      <ConfirmDialog
+        open={!!linkCommand}
+        title="Allow this link?"
+        detail={linkCommand ? describeLink(linkCommand) : ""}
+        action="Allow"
+        danger={false}
+        onCancel={() => setLinkQueue((queue) => queue.slice(1))}
+        onConfirm={() => { if (linkCommand) remoteHandlerRef.current(linkCommand); setLinkQueue((queue) => queue.slice(1)); }}
+      />
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </>
   );

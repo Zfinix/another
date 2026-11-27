@@ -8,9 +8,11 @@ export interface PhoneNotification {
   title: string;
   text: string;
   posted_ms: number;
+  alert_once: boolean;
 }
 
 const POLL_MS = 4000;
+const MIRRORING_POLL_MS = 30000;
 const CODE_PATTERN = /(?:code|otp|pin|passcode|verification|verify|sign-in|login)/i;
 const CODE_DIGITS = /\b(\d{4,8})\b/;
 
@@ -70,6 +72,10 @@ async function notifyMac(serial: string, n: PhoneNotification, deviceName: strin
   await invoke("notify_phone", { title: n.title, subtitle: `${appName(n.package)} · ${deviceName}`, body: n.text, package: n.package, icon }).catch(() => { });
 }
 
+function contentOf(n: PhoneNotification) {
+  return `${n.title}\n${n.text}`;
+}
+
 function readFlag(key: string, fallback: boolean) {
   const stored = localStorage.getItem(key);
   return stored === null ? fallback : stored === "true";
@@ -78,9 +84,10 @@ function readFlag(key: string, fallback: boolean) {
 interface Options {
   serial: string | null;
   deviceName: string;
+  mirroring: boolean;
 }
 
-export function useNotifications({ serial, deviceName }: Options) {
+export function useNotifications({ serial, deviceName, mirroring }: Options) {
   const [items, setItems] = useState<PhoneNotification[]>([]);
   const [systemCenter, setSystemCenterState] = useState(() => readFlag("notify_system", true));
   const [offerCodes, setOfferCodesState] = useState(() => readFlag("notify_codes", true));
@@ -88,7 +95,8 @@ export function useNotifications({ serial, deviceName }: Options) {
   const asked = useRef<Set<string>>(new Set());
   const iconsRef = useRef(icons);
   iconsRef.current = icons;
-  const seen = useRef<Set<string> | null>(null);
+  const seen = useRef<Map<string, string> | null>(null);
+  const wasMirroring = useRef(mirroring);
   const optionsRef = useRef({ systemCenter, offerCodes, deviceName });
   optionsRef.current = { systemCenter, offerCodes, deviceName };
 
@@ -108,6 +116,11 @@ export function useNotifications({ serial, deviceName }: Options) {
   useEffect(() => {
     seen.current = null;
     setItems([]);
+  }, [serial]);
+
+  useEffect(() => {
+    let quiet = wasMirroring.current && !mirroring;
+    wasMirroring.current = mirroring;
     if (!serial) return;
     let stopped = false;
 
@@ -117,22 +130,28 @@ export function useNotifications({ serial, deviceName }: Options) {
         if (stopped) return;
         setItems(list);
         const known = seen.current;
-        seen.current = new Set(list.map((n) => n.key));
-        if (!known) return;
-        const fresh = list.filter((n) => !known.has(n.key));
+        seen.current = new Map(list.map((n) => [n.key, contentOf(n)]));
+        if (!known || quiet) {
+          quiet = false;
+          return;
+        }
+        const fresh = list.filter((n) => {
+          const before = known.get(n.key);
+          return before === undefined || (before !== contentOf(n) && !n.alert_once);
+        });
         if (fresh.length === 0) return;
         const { systemCenter: toCenter, deviceName: name } = optionsRef.current;
         if (toCenter) fresh.forEach((n) => notifyMac(serial, n, name, iconsRef.current[n.package]));
       } catch { }
     };
 
-    poll();
-    const timer = setInterval(poll, POLL_MS);
+    if (!mirroring) poll();
+    const timer = setInterval(poll, mirroring ? MIRRORING_POLL_MS : POLL_MS);
     return () => {
       stopped = true;
       clearInterval(timer);
     };
-  }, [serial]);
+  }, [serial, mirroring]);
 
   useEffect(() => {
     if (!serial) return;

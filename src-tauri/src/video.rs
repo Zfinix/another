@@ -4,7 +4,8 @@ use another_core::h264;
 use another_core::transport::DeviceStream;
 use anyhow::Result;
 use base64::Engine;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use tauri::ipc::Channel;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Notify;
@@ -14,6 +15,34 @@ const FLAG_KEY_FRAME: u64 = 1 << 62;
 /// The Another server marks a config packet with every pts bit set to carry its clock instead.
 const CLOCK_PTS: u64 = FLAG_KEY_FRAME - 1;
 const CLOCK_PAYLOAD_SIZE: usize = 8;
+/// Caps the packets kept since the last key frame, so a stream without key frames cannot grow it
+/// forever. Both servers send a key frame at least every 10 s, which this covers up to 240 fps.
+const MAX_KEPT_PACKETS: usize = 2400;
+
+/// The mirror windows that are recording, and each window's feed, keyed by window label.
+static RECORDING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+static RECORD_FEEDS: LazyLock<Mutex<HashMap<String, Weak<Mutex<RecordFeed>>>>> = LazyLock::new(Default::default);
+
+fn is_recording(label: &str) -> bool {
+    RECORDING.lock().is_ok_and(|recording| recording.contains(label))
+}
+
+/// While on, the native renderer also sends the window's stream to its webview so it can be recorded there.
+pub fn set_record_feed(label: &str, enabled: bool) {
+    if let Ok(mut recording) = RECORDING.lock() {
+        if enabled {
+            recording.insert(label.to_string());
+        } else {
+            recording.remove(label);
+        }
+    }
+    let feed = RECORD_FEEDS.lock().ok().and_then(|feeds| feeds.get(label).and_then(Weak::upgrade));
+    if let Some(feed) = feed {
+        if let Ok(mut feed) = feed.lock() {
+            feed.set_feeding(enabled);
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum VideoCodec {
@@ -34,6 +63,10 @@ pub enum FrameEvent {
         recv_ms: f64,
         capture_ms: Option<f64>,
     },
+    #[serde(rename = "record_config")]
+    RecordConfig { codec: String, description: String },
+    #[serde(rename = "record_packet")]
+    RecordPacket { key: bool, data: String, timestamp: u64 },
     #[serde(rename = "disconnected")]
     Disconnected { reason: String },
     #[serde(rename = "native_size")]
@@ -52,6 +85,79 @@ pub enum FrameEvent {
     },
 }
 
+/// Mirrors the native stream to the webview while a recording runs. Packets since the last key
+/// frame are kept, so a recording that starts mid-stream can decode right away.
+struct RecordFeed {
+    channel: Channel<FrameEvent>,
+    config: Option<(String, String)>,
+    kept: Vec<(bool, u64, Vec<u8>)>,
+    feeding: bool,
+}
+
+impl RecordFeed {
+    fn register(label: &str, channel: Channel<FrameEvent>) -> Arc<Mutex<Self>> {
+        let feed = Arc::new(Mutex::new(Self {
+            channel,
+            config: None,
+            kept: Vec::new(),
+            feeding: is_recording(label),
+        }));
+        if let Ok(mut feeds) = RECORD_FEEDS.lock() {
+            feeds.retain(|_, feed| feed.strong_count() > 0);
+            feeds.insert(label.to_string(), Arc::downgrade(&feed));
+        }
+        feed
+    }
+
+    fn set_feeding(&mut self, feeding: bool) {
+        if feeding {
+            self.send_config();
+            for (key, pts, avcc) in &self.kept {
+                send_record_packet(&self.channel, *key, *pts, avcc);
+            }
+        }
+        self.feeding = feeding;
+    }
+
+    fn send_config(&self) {
+        if let Some((codec, description)) = &self.config {
+            let _ = self.channel.send(FrameEvent::RecordConfig {
+                codec: codec.clone(),
+                description: description.clone(),
+            });
+        }
+    }
+
+    fn configure(&mut self, codec: String, description: &[u8]) {
+        let description = base64::engine::general_purpose::STANDARD.encode(description);
+        self.config = Some((codec, description));
+        self.kept.clear();
+        if self.feeding {
+            self.send_config();
+        }
+    }
+
+    fn packet(&mut self, key: bool, pts: u64, avcc: Vec<u8>) {
+        if self.feeding {
+            send_record_packet(&self.channel, key, pts, &avcc);
+        }
+        if key || self.kept.len() >= MAX_KEPT_PACKETS {
+            self.kept.clear();
+        }
+        if key || !self.kept.is_empty() {
+            self.kept.push((key, pts, avcc));
+        }
+    }
+}
+
+fn send_record_packet(channel: &Channel<FrameEvent>, key: bool, pts: u64, avcc: &[u8]) {
+    let _ = channel.send(FrameEvent::RecordPacket {
+        key,
+        data: base64::engine::general_purpose::STANDARD.encode(avcc),
+        timestamp: pts,
+    });
+}
+
 fn epoch_ms() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -60,6 +166,7 @@ fn epoch_ms() -> f64 {
 }
 
 pub async fn stream_video(
+    label: String,
     mut video_socket: DeviceStream,
     channel: Channel<FrameEvent>,
     mut ws: Option<VideoSocket>,
@@ -68,7 +175,7 @@ pub async fn stream_video(
     codec: VideoCodec,
 ) {
     let result = tokio::select! {
-        r = forward_loop(&mut video_socket, &channel, ws.as_mut(), native.as_mut(), codec) => r,
+        r = forward_loop(&label, &mut video_socket, &channel, ws.as_mut(), native.as_mut(), codec) => r,
         _ = shutdown.notified() => Ok(()),
     };
     if let Some(ws) = ws {
@@ -83,6 +190,7 @@ pub async fn stream_video(
 }
 
 async fn forward_loop(
+    label: &str,
     socket: &mut DeviceStream,
     channel: &Channel<FrameEvent>,
     mut ws: Option<&mut VideoSocket>,
@@ -90,6 +198,7 @@ async fn forward_loop(
     codec: VideoCodec,
 ) -> Result<()> {
     let mut clock_offset_ms: Option<f64> = None;
+    let record = native.is_some().then(|| RecordFeed::register(label, channel.clone()));
     loop {
         let mut header = [0u8; 12];
         socket.read_exact(&mut header).await?;
@@ -121,18 +230,21 @@ async fn forward_loop(
 
         if is_config {
             let nals = split_nals(&data);
+            let (codec_str, desc) = match codec {
+                VideoCodec::H264 => parse_h264_config(&nals),
+                VideoCodec::H265 => parse_h265_config(&nals),
+            };
             if let Some(native) = native.as_deref_mut() {
                 let sets = parameter_sets(&nals, codec);
                 let refs: Vec<&[u8]> = sets.iter().map(Vec::as_slice).collect();
                 if let Err(e) = native.configure(codec, &refs) {
                     eprintln!("[native-video] {}", e);
                 }
+                if let Some(mut record) = record.as_ref().and_then(|r| r.lock().ok()) {
+                    record.configure(codec_str, &desc);
+                }
                 continue;
             }
-            let (codec_str, desc) = match codec {
-                VideoCodec::H264 => parse_h264_config(&nals),
-                VideoCodec::H265 => parse_h265_config(&nals),
-            };
             if let Some(ws) = ws.as_deref_mut() {
                 ws.send_config(&codec_str, &desc).await?;
                 continue;
@@ -146,6 +258,9 @@ async fn forward_loop(
             if let Some(native) = native.as_deref_mut() {
                 if let Err(e) = native.decode(&avcc, pts, recv_ms, capture_ms) {
                     eprintln!("[native-video] {}", e);
+                }
+                if let Some(mut record) = record.as_ref().and_then(|r| r.lock().ok()) {
+                    record.packet(is_key, pts, avcc);
                 }
                 continue;
             }

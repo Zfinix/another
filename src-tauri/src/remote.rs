@@ -3,6 +3,9 @@
 //! The server listens on loopback only and every request must carry the token written to
 //! `control.json` in the app data directory, so other users, other machines and web pages cannot
 //! drive the app. Commands are handed to the UI as events; the UI reports its state back.
+//!
+//! `another://` links carry no token, since any web page can open one, so they reach the UI
+//! wrapped in a `link` command and only run after the user confirms them.
 
 use anyhow::{anyhow, Result};
 use axum::extract::{Query, State};
@@ -72,6 +75,11 @@ pub fn dispatch(app: &AppHandle, command: Value) {
     } else if let Ok(mut pending) = state.pending.lock() {
         pending.push(command);
     }
+}
+
+/// Wraps a command from an `another://` link so the UI asks the user before running it.
+pub fn ask_first(command: Value) -> Value {
+    json!({ "action": "link", "command": command })
 }
 
 #[derive(Clone)]
@@ -173,7 +181,7 @@ pub fn normalize_command(body: Value) -> Result<Value> {
             let profile = body.get("profile").ok_or_else(|| anyhow!("'apply' needs a 'profile'"))?;
             let profile = another_core::profile::validate(profile)?;
             let mut command = json!({ "action": "apply", "profile": profile });
-            if let Some(serial) = body.get("connect").and_then(Value::as_str) {
+            if let Some(serial) = body.get("connect").and_then(Value::as_str).filter(|s| !s.is_empty()) {
                 command["connect"] = json!(serial);
             }
             Ok(command)
@@ -319,5 +327,6 @@ mod tests {
         .unwrap();
         assert_eq!(apply["profile"]["dev"]["nativeVideo"], true);
         assert_eq!(apply["connect"], "ABC");
+        assert!(normalize_command(json!({ "action": "link", "command": { "action": "connect", "serial": "ABC" } })).is_err());
     }
 }

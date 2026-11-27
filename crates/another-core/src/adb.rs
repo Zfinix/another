@@ -236,14 +236,12 @@ pub async fn remove_reverse(serial: &str, remote: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn kill_scrcpy_server(serial: &str) {
-    let _ = run_adb(&[
-        "-s",
-        serial,
-        "shell",
-        "pkill -f com.genymobile.scrcpy.Server",
-    ])
-    .await;
+/// Kills both the scrcpy server and the Another server. The brackets keep the pattern from matching the shell that
+/// runs it.
+pub const KILL_SERVERS_CMD: &str = "pkill -f '[c]om.genymobile.scrcpy.Server|[d]ev.another.server.Main'";
+
+pub async fn kill_mirror_servers(serial: &str) {
+    let _ = run_adb(&["-s", serial, "shell", KILL_SERVERS_CMD]).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 }
 
@@ -419,15 +417,20 @@ pub async fn lock_screen_capture(serial: &str) -> Result<Option<Vec<u8>>> {
         }
         return Ok(None);
     }
-    run_adb(&["-s", serial, "shell", "input", "keyevent", KEYCODE_WAKEUP]).await?;
-    tokio::time::sleep(WAKE_SETTLE).await;
-    let capture = if keyguard_showing(serial).await? {
-        exec_out_screencap(serial).await.map(Some)
-    } else {
-        Ok(None)
-    };
-    run_adb(&["-s", serial, "shell", "input", "keyevent", KEYCODE_SLEEP]).await?;
-    capture
+    let capture = async {
+        run_adb(&["-s", serial, "shell", "input", "keyevent", KEYCODE_WAKEUP]).await?;
+        tokio::time::sleep(WAKE_SETTLE).await;
+        if keyguard_showing(serial).await? {
+            exec_out_screencap(serial).await.map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+    .await;
+    let slept = run_adb(&["-s", serial, "shell", "input", "keyevent", KEYCODE_SLEEP]).await;
+    let capture = capture?;
+    slept?;
+    Ok(capture)
 }
 
 /// Who made the phone and what it is called, read in one round trip. Emulators also report the

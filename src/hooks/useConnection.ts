@@ -16,6 +16,12 @@ const VIDEO_KIND_CONFIG = 0;
 const VIDEO_KIND_KEY = 1;
 const VIDEO_HEADER_LEN = 25;
 const MAX_TRACKED_DECODES = 300;
+const RECORD_FPS = 30;
+const RECORDING_FORMATS = [
+  { mime: "video/webm;codecs=vp9", ext: "webm" },
+  { mime: "video/webm", ext: "webm" },
+  { mime: "video/mp4", ext: "mp4" },
+];
 
 interface PerfCounters {
   packets: number;
@@ -62,6 +68,21 @@ export function windowSizeFor(width: number, height: number) {
   return new LogicalSize(Math.max(viewW, 280) + CHROME_W, viewH + CHROME_H);
 }
 
+function evenSize(n: number) {
+  return Math.max(2, Math.round(n / 2) * 2);
+}
+
+function drawFitted(target: HTMLCanvasElement, source: CanvasImageSource, sourceW: number, sourceH: number) {
+  const ctx = target.getContext("2d");
+  if (!ctx) return;
+  ctx.fillRect(0, 0, target.width, target.height);
+  if (!sourceW || !sourceH) return;
+  const scale = Math.min(target.width / sourceW, target.height / sourceH);
+  const width = sourceW * scale;
+  const height = sourceH * scale;
+  ctx.drawImage(source, (target.width - width) / 2, (target.height - height) / 2, width, height);
+}
+
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
@@ -89,6 +110,7 @@ interface UseConnectionOptions {
   onDisconnectRequested?: () => void;
   /** Window size for a phone screen of this size, when the first frame arrives. */
   initialSize?: (width: number, height: number) => LogicalSize;
+  onRecordingSaved?: () => void;
   perfOverlay?: boolean;
   directAdb?: boolean;
   lowLatency?: boolean;
@@ -113,8 +135,15 @@ export function useConnection(opts: UseConnectionOptions) {
   const isMouseDownRef = useRef(false);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isReconnecting = useRef(false);
+  const mutedRef = useRef(false);
+  mutedRef.current = muted;
   const recorderRef = useRef<MediaRecorder | null>(null);
-  const recordedChunks = useRef<Blob[]>([]);
+  const recordCanvas = useRef<HTMLCanvasElement | null>(null);
+  const recordDecoder = useRef<VideoDecoder | null>(null);
+  const recordAwaitingKey = useRef(true);
+  const recordWarned = useRef(false);
+  const onRecordingSavedRef = useRef(opts.onRecordingSaved);
+  onRecordingSavedRef.current = opts.onRecordingSaved;
   const nativeSize = useRef({ width: 1080, height: 1920 });
   const displaySizeRef = useRef({ width: 1080, height: 1920 });
   const resizeSnapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -181,9 +210,62 @@ export function useConnection(opts: UseConnectionOptions) {
     decoderRef.current = null;
     pendingPackets.current = [];
     awaitingKeyFrame.current = true;
-    setMutedState(false);
-    if (recorderRef.current && recorderRef.current.state === "recording") {
-      recorderRef.current.stop();
+  }, []);
+
+  const closeRecordDecoder = useCallback(() => {
+    const decoder = recordDecoder.current;
+    recordDecoder.current = null;
+    if (decoder && decoder.state !== "closed") decoder.close();
+  }, []);
+
+  const stopRecording = useCallback(() => {
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    recordCanvas.current?.remove();
+    recordCanvas.current = null;
+    closeRecordDecoder();
+    setRecording(false);
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+    invoke("set_record_feed", { enabled: false }).catch(() => { });
+  }, [closeRecordDecoder]);
+
+  const handleRecordConfig = useCallback((codec: string, description: Uint8Array) => {
+    closeRecordDecoder();
+    if (!recordCanvas.current) return;
+    const decoder: VideoDecoder = new VideoDecoder({
+      output: (frame: VideoFrame) => {
+        const target = recordCanvas.current;
+        if (target) drawFitted(target, frame, frame.displayWidth, frame.displayHeight);
+        frame.close();
+      },
+      error: (e: DOMException) => {
+        console.error("Recording decoder error:", e);
+        if (recordDecoder.current === decoder) recordDecoder.current = null;
+        if (recordWarned.current) return;
+        recordWarned.current = true;
+        const hevc = codec.startsWith("hev1") || codec.startsWith("hvc1");
+        showToast("The recording has no picture", "error", {
+          detail: hevc ? "This Mac cannot decode H.265 for recording. Switch the codec to H.264 in Settings, then record again" : e.message,
+        });
+      },
+    });
+    decoder.configure({ codec, description, hardwareAcceleration: "prefer-hardware", optimizeForLatency: true });
+    recordDecoder.current = decoder;
+    recordAwaitingKey.current = true;
+  }, [closeRecordDecoder, showToast]);
+
+  const feedRecordPacket = useCallback((key: boolean, timestamp: number, data: Uint8Array) => {
+    const decoder = recordDecoder.current;
+    if (!decoder || decoder.state !== "configured") return;
+    if (recordAwaitingKey.current) {
+      if (!key) return;
+      recordAwaitingKey.current = false;
+    }
+    try {
+      decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp, data }));
+    } catch (e) {
+      console.error("Recording decode failed:", e);
+      recordAwaitingKey.current = true;
     }
   }, []);
 
@@ -218,6 +300,11 @@ export function useConnection(opts: UseConnectionOptions) {
       nativeVideoRef.current = dev.nativeVideo;
       networkStreamRef.current = dev.networkStream;
       perfOverlayRef.current = dev.perfOverlay;
+    }
+    if (!silent && reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    if (!silent) {
+      stopRecording();
+      setMutedState(false);
     }
     const gen = ++connectionGen.current;
     const keepLastFrame = silent && streamReadyRef.current;
@@ -301,6 +388,7 @@ export function useConnection(opts: UseConnectionOptions) {
                   resizeToFrame(canvas, f.displayWidth, f.displayHeight);
                   const ctx = canvas.getContext("2d");
                   if (ctx) ctx.drawImage(f, 0, 0);
+                  if (recordCanvas.current) drawFitted(recordCanvas.current, f, f.displayWidth, f.displayHeight);
                   frameDrawnRef.current?.();
                   const captureMs = captureTimes.current.get(f.timestamp);
                   if (captureMs !== undefined) {
@@ -391,6 +479,10 @@ export function useConnection(opts: UseConnectionOptions) {
           handleConfig(msg.data.codec, b64ToBytes(msg.data.description));
         } else if (msg.event === "packet") {
           handlePacket(msg.data.key, msg.data.timestamp, msg.data.recv_ms, msg.data.capture_ms, b64ToBytes(msg.data.data));
+        } else if (msg.event === "record_config") {
+          handleRecordConfig(msg.data.codec, b64ToBytes(msg.data.description));
+        } else if (msg.event === "record_packet") {
+          feedRecordPacket(msg.data.key, msg.data.timestamp, b64ToBytes(msg.data.data));
         } else if (msg.event === "native_size") {
           const canvas = canvasRef.current;
           if (canvas) resizeToFrame(canvas, msg.data.width, msg.data.height);
@@ -422,6 +514,8 @@ export function useConnection(opts: UseConnectionOptions) {
           cleanupDecoder();
           closeVideoSocket();
           if (!isReconnecting.current) {
+            stopRecording();
+            setMutedState(false);
             setConnectedDevice(null);
             setScreen("welcome");
             setNativeActive(false);
@@ -446,6 +540,7 @@ export function useConnection(opts: UseConnectionOptions) {
       });
       if (gen !== connectionGen.current) return;
       setNativeActive(native);
+      if (silent && mutedRef.current) invoke("set_muted", { muted: true }).catch(() => { });
       if (videoUrl) {
         const ws = new WebSocket(videoUrl);
         ws.binaryType = "arraybuffer";
@@ -500,7 +595,7 @@ export function useConnection(opts: UseConnectionOptions) {
         isReconnecting.current = false;
       }
     }
-  }, [showToast, cleanupDecoder, feedChunk, closeVideoSocket]);
+  }, [showToast, cleanupDecoder, feedChunk, closeVideoSocket, stopRecording, handleRecordConfig, feedRecordPacket]);
   reconnectRef.current = (device, s) => { connectToDevice(device, s, true); };
 
   const disconnect = useCallback(async () => {
@@ -508,11 +603,13 @@ export function useConnection(opts: UseConnectionOptions) {
     isReconnecting.current = false;
     cleanupDecoder();
     closeVideoSocket();
+    stopRecording();
+    setMutedState(false);
     try { await invoke("disconnect_device"); } catch { }
     setConnectedDevice(null);
     setScreen("welcome");
     setNativeActive(false);
-  }, [cleanupDecoder, closeVideoSocket]);
+  }, [cleanupDecoder, closeVideoSocket, stopRecording]);
 
   const scheduleReconnect = useCallback((s: Settings) => {
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
@@ -525,55 +622,59 @@ export function useConnection(opts: UseConnectionOptions) {
   }, [connectedDevice, connectToDevice]);
 
   const toggleRecording = useCallback(() => {
-    if (recorderRef.current && recorderRef.current.state === "recording") {
-      recorderRef.current.stop();
+    if (recorderRef.current) {
+      stopRecording();
       return;
     }
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const stream = canvas.captureStream(30);
-    recordedChunks.current = [];
-    const recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
+    const source = canvasRef.current;
+    if (!source) return;
+    const format = RECORDING_FORMATS.find((f) => MediaRecorder.isTypeSupported(f.mime));
+    if (!format) {
+      showToast("Could not record the screen", "error", { detail: "This Mac cannot encode video for recording" });
+      return;
+    }
+    const target = document.createElement("canvas");
+    target.width = evenSize(source.width);
+    target.height = evenSize(source.height);
+    target.setAttribute("aria-hidden", "true");
+    target.style.cssText = "position:fixed;left:-100000px;top:0;pointer-events:none";
+    document.body.appendChild(target);
+    drawFitted(target, source, source.width, source.height);
+    const chunks: Blob[] = [];
+    const recorder = new MediaRecorder(target.captureStream(RECORD_FPS), { mimeType: format.mime });
     recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) recordedChunks.current.push(e.data);
+      if (e.data.size > 0) chunks.push(e.data);
     };
     recorder.onstop = async () => {
-      const blob = new Blob(recordedChunks.current, { type: "video/webm" });
+      const blob = new Blob(chunks, { type: format.mime.split(";")[0] });
+      const filename = `recording-${Date.now()}.${format.ext}`;
       const savePath = localStorage.getItem("save_path");
       if (savePath) {
         try {
-          const buffer = await blob.arrayBuffer();
-          const bytes = new Uint8Array(buffer);
-          let binary = "";
-          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-          const base64 = btoa(binary);
-          const filename = `recording-${Date.now()}.webm`;
-          await invoke("save_file", { path: `${savePath}/${filename}`, data: base64 });
-        } catch {
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = `recording-${Date.now()}.webm`;
-          link.click();
-          URL.revokeObjectURL(url);
-        }
-      } else {
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `recording-${Date.now()}.webm`;
-        link.click();
-        URL.revokeObjectURL(url);
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          const path = String.fromCharCode(...new TextEncoder().encode(`${savePath}/${filename}`));
+          await invoke("save_bytes", bytes, { headers: { path: btoa(path) } });
+          onRecordingSavedRef.current?.();
+          showToast("Recording saved", "success");
+          return;
+        } catch { }
       }
-      recordedChunks.current = [];
-      recorderRef.current = null;
-      setRecording(false);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
       showToast("Recording saved", "success");
     };
-    recorder.start(100);
+    recordCanvas.current = target;
     recorderRef.current = recorder;
+    recorder.start(100);
     setRecording(true);
-  }, [showToast]);
+    recordWarned.current = false;
+    invoke("set_record_feed", { enabled: true }).catch(() => { });
+    if (anotherServerRef.current) invoke("request_key_frame").catch(() => { });
+  }, [showToast, stopRecording]);
 
   const pressButton = useCallback(async (button: string) => {
     opts.onRecordEvent?.({ type: "button", button });

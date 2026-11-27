@@ -97,9 +97,11 @@ export function AgentsView({ showToast }: { showToast: ShowToast }) {
   const installCli = async () => {
     setInstalling(true);
     try {
-      const path = await invoke<string>("install_cli");
-      setCliPath(path);
-      showToast("The another command is installed", "success", { detail: "Open a new Terminal window and run another status" });
+      const installed = await invoke<{ path: string; dir: string; on_path: boolean }>("install_cli");
+      setCliPath(installed.path);
+      showToast("The another command is installed", "success", {
+        detail: installed.on_path ? "Open a new Terminal window and run another status" : `Add ${installed.dir} to your PATH, then open a new Terminal window`,
+      });
     } catch (e) {
       if (`${e}` !== "Cancelled") showToast("Could not install the another command", "error", { detail: `${e}` });
     } finally {

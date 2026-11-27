@@ -72,9 +72,13 @@ export interface Profile {
   dev?: Partial<DevSettings>;
 }
 
-export type RemoteCommand =
+export type LinkCommand =
   | { action: "apply"; profile: Profile; connect?: string }
-  | { action: "connect"; serial: string }
+  | { action: "connect"; serial: string };
+
+export type RemoteCommand =
+  | LinkCommand
+  | { action: "link"; command: LinkCommand }
   | { action: "disconnect"; serial?: string }
   | { action: "measure" };
 
@@ -137,6 +141,8 @@ export interface SavedMacro {
 export type FrameEvent =
   | { event: "config"; data: { codec: string; description: string } }
   | { event: "packet"; data: { key: boolean; data: string; timestamp: number; recv_ms: number; capture_ms: number | null } }
+  | { event: "record_config"; data: { codec: string; description: string } }
+  | { event: "record_packet"; data: { key: boolean; data: string; timestamp: number } }
   | { event: "disconnected"; data: { reason: string } }
   | { event: "native_size"; data: { width: number; height: number } }
   | {
@@ -187,6 +193,8 @@ const BEST_OVER_NETWORK: Partial<Settings> = { max_size: 1920, video_bit_rate: 1
 export function bestSettings(network: boolean): Settings {
   return network ? { ...PRESETS.best, ...BEST_OVER_NETWORK } : PRESETS.best;
 }
+
+export const DEFAULT_SETTINGS: Required<Settings> = { ...PRESETS.balanced, adaptive_network: true };
 
 export const RESOLUTION_OPTIONS = [
   { value: 480, label: "480p" },

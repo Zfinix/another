@@ -31,5 +31,5 @@ dist-ssr
 # Credentials
 credentials/
 
-# Sidecar binaries built by scripts/build-cli.sh
+# Sidecar binaries built by scripts/build-cli.ts
 src-tauri/binaries/

@@ -8,6 +8,7 @@ use crate::stream_ws;
 use crate::video::{self, FrameEvent};
 use base64::Engine;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -26,10 +27,18 @@ const VIEWER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 /// Stops the session shown in a window, if there is one.
 pub async fn end_session(state: &AppState, label: &str) {
-    let session = state.sessions.lock().await.remove(label);
+    let mut sessions = state.sessions.lock().await;
+    let session = sessions.remove(label);
+    let still_shown = session
+        .as_ref()
+        .is_some_and(|ended| sessions.values().any(|s| s.device_serial == ended.device_serial));
+    drop(sessions);
     if let Some(session) = session {
         session.shutdown.notify_one();
         scrcpy::stop_server(&session.device_serial, session.port.port).await;
+        if !still_shown {
+            restore_stay_on(&state.stay_on, &session.device_serial).await;
+        }
     }
 }
 
@@ -134,6 +143,8 @@ pub async fn connect_device(
     }
 
     let sessions_arc = state.sessions.clone();
+    let stay_on_arc = state.stay_on.clone();
+    let video_label = label.clone();
     let serial_clone = serial.clone();
 
     let video_codec = if settings.video_codec == "h265" {
@@ -149,7 +160,7 @@ pub async fn connect_device(
         };
         match ws {
             Ok(ws) => {
-                video::stream_video(streams.video_socket, on_frame, ws, native, shutdown.clone(), video_codec)
+                video::stream_video(video_label, streams.video_socket, on_frame, ws, native, shutdown.clone(), video_codec)
                     .await
             }
             Err(e) => {
@@ -162,9 +173,13 @@ pub async fn connect_device(
         let mut sessions = sessions_arc.lock().await;
         if sessions.get(&label).is_some_and(|current| current.id == session_id) {
             let ended = sessions.remove(&label);
+            let still_shown = sessions.values().any(|s| s.device_serial == serial_clone);
             drop(sessions);
             scrcpy::stop_server(&serial_clone, port).await;
             drop(ended);
+            if !still_shown {
+                restore_stay_on(&stay_on_arc, &serial_clone).await;
+            }
         }
     });
 
@@ -203,6 +218,7 @@ pub fn set_native_video_frame(window: WebviewWindow, x: f64, y: f64, width: f64,
 #[tauri::command]
 pub async fn disconnect_device(window: WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
     native_video::detach(window.label());
+    video::set_record_feed(window.label(), false);
     end_session(&state, window.label()).await;
     Ok(())
 }
@@ -578,13 +594,33 @@ pub async fn save_file(path: String, data: String) -> Result<(), String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&data)
         .map_err(|e| format!("Failed to decode base64: {}", e))?;
-    let file_path = PathBuf::from(&path);
-    if let Some(parent) = file_path.parent() {
+    write_file(PathBuf::from(&path), &bytes).await
+}
+
+/// Saves the raw request body to the file named by the `path` header, given as base64 of its UTF-8
+/// bytes. Large files such as recordings skip the base64 round trip through JSON this way.
+#[tauri::command]
+pub async fn save_bytes(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected the file contents as bytes".to_string());
+    };
+    let path = request
+        .headers()
+        .get("path")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
+        .and_then(|value| String::from_utf8(value).ok())
+        .ok_or("Expected a path to save to")?;
+    write_file(PathBuf::from(path), bytes).await
+}
+
+async fn write_file(path: PathBuf, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| e.to_string())?;
     }
-    tokio::fs::write(&file_path, bytes)
+    tokio::fs::write(&path, bytes)
         .await
         .map_err(|e| format!("Failed to write file: {}", e))
 }
@@ -965,9 +1001,41 @@ pub async fn open_phone_app(serial: String, package: String) -> Result<(), Strin
     adb::launch_app(&serial, &package).await.map_err(|e| e.to_string())
 }
 
+const STAY_ON_ALL_SOURCES: &str = "7";
+
+/// Puts back the `stay_on_while_plugged_in` value Another replaced on `serial`.
+pub async fn restore_stay_on(stay_on: &Mutex<HashMap<String, String>>, serial: &str) {
+    let previous = stay_on.lock().await.remove(serial);
+    if let Some(previous) = previous {
+        if let Err(e) = adb::set_stay_on(serial, &previous).await {
+            eprintln!("[stay-on] could not restore {} on {}: {}", previous, serial, e);
+        }
+    }
+}
+
+/// Puts back every phone's setting, when the app quits.
+pub async fn restore_all_stay_on(stay_on: &Mutex<HashMap<String, String>>) {
+    let serials: Vec<String> = stay_on.lock().await.keys().cloned().collect();
+    for serial in serials {
+        restore_stay_on(stay_on, &serial).await;
+    }
+}
+
+/// Keeps `serial` awake while plugged in, or puts back the setting it replaced. The setting is also
+/// put back when the phone's last mirror session ends and when the app quits.
 #[tauri::command]
-pub async fn set_stay_on(serial: String, value: String) -> Result<String, String> {
-    adb::set_stay_on(&serial, &value).await.map_err(|e| e.to_string())
+pub async fn set_stay_on(serial: String, on: bool, state: State<'_, AppState>) -> Result<(), String> {
+    if !on {
+        restore_stay_on(&state.stay_on, &serial).await;
+        return Ok(());
+    }
+    let mut stay_on = state.stay_on.lock().await;
+    if stay_on.contains_key(&serial) {
+        return Ok(());
+    }
+    let previous = adb::set_stay_on(&serial, STAY_ON_ALL_SOURCES).await.map_err(|e| e.to_string())?;
+    stay_on.insert(serial, if previous == "null" { "0".to_string() } else { previous });
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -1078,10 +1146,20 @@ pub async fn device_facts(serial: String) -> Result<adb::DeviceFacts, String> {
 
 const CLI_NAME: &str = "another-cli";
 const CLI_COMMAND: &str = "another";
-const CLI_INSTALL_DIR: &str = "/usr/local/bin";
 
-fn cli_link() -> PathBuf {
-    PathBuf::from(CLI_INSTALL_DIR).join(CLI_COMMAND)
+/// The folder on the PATH that `another` goes into. Windows has none the app can write to.
+fn cli_install_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        Some(PathBuf::from("/usr/local/bin"))
+    } else if cfg!(unix) {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("bin"))
+    } else {
+        None
+    }
+}
+
+fn cli_link() -> Option<PathBuf> {
+    cli_install_dir().map(|dir| dir.join(CLI_COMMAND))
 }
 
 /// True when the `another` link on the PATH points at a copy of this app's CLI.
@@ -1096,7 +1174,7 @@ fn bundled_cli() -> Result<PathBuf, String> {
     let path = exe
         .parent()
         .ok_or("The app has no folder")?
-        .join(CLI_NAME);
+        .join(format!("{}{}", CLI_NAME, std::env::consts::EXE_SUFFIX));
     if path.exists() {
         Ok(path)
     } else {
@@ -1107,34 +1185,68 @@ fn bundled_cli() -> Result<PathBuf, String> {
 /// Where the `another` command is installed on the PATH, if this app installed it.
 #[tauri::command]
 pub async fn cli_status() -> Option<String> {
-    let link = cli_link();
+    let link = cli_link()?;
     (link.exists() && link_is_ours(&link)).then(|| link.to_string_lossy().into_owned())
 }
 
-/// Links the bundled CLI into /usr/local/bin as `another`, asking for an administrator password
-/// through macOS only when the folder is not writable.
+/// Links the bundled CLI onto the PATH as `another`. On macOS that is /usr/local/bin, asking for
+/// an administrator password only when the folder is not writable. Elsewhere it is ~/.local/bin.
+#[derive(Serialize)]
+pub struct CliInstall {
+    pub path: String,
+    pub dir: String,
+    pub on_path: bool,
+}
+
+#[cfg(unix)]
+fn on_path(dir: &std::path::Path) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|p| p == dir))
+}
+
+/// An AppImage runs from a mount that goes away when the app quits, so its CLI is copied somewhere
+/// stable first. The copy keeps the CLI's name, so `link_is_ours` still recognizes the link.
+#[cfg(unix)]
+fn stable_cli(source: PathBuf) -> Result<PathBuf, String> {
+    if cfg!(target_os = "macos") || std::env::var_os("APPIMAGE").is_none() {
+        return Ok(source);
+    }
+    let home = std::env::var_os("HOME").ok_or("Could not find your home folder")?;
+    let dir = PathBuf::from(home).join(".local").join("share").join("another");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let copy = dir.join(CLI_NAME);
+    std::fs::copy(&source, &copy).map_err(|e| e.to_string())?;
+    Ok(copy)
+}
+
 #[cfg(unix)]
 #[tauri::command]
-pub async fn install_cli() -> Result<String, String> {
-    let source = bundled_cli()?;
-    let link = cli_link();
+pub async fn install_cli() -> Result<CliInstall, String> {
+    let source = stable_cli(bundled_cli()?)?;
+    let dir = cli_install_dir().ok_or("Could not find your home folder")?;
+    let link = dir.join(CLI_COMMAND);
     if link.symlink_metadata().is_ok() && !link_is_ours(&link) {
-        return Err(format!("{} already has a different command named {}", CLI_INSTALL_DIR, CLI_COMMAND));
+        return Err(format!("{} already has a different command named {}", dir.display(), CLI_COMMAND));
     }
     let direct = (|| -> std::io::Result<()> {
-        std::fs::create_dir_all(CLI_INSTALL_DIR)?;
+        std::fs::create_dir_all(&dir)?;
         if link.symlink_metadata().is_ok() {
             std::fs::remove_file(&link)?;
         }
         std::os::unix::fs::symlink(&source, &link)
     })();
+    let installed = CliInstall {
+        path: link.to_string_lossy().into_owned(),
+        dir: dir.to_string_lossy().into_owned(),
+        on_path: cfg!(target_os = "macos") || on_path(&dir),
+    };
     match direct {
-        Ok(()) => Ok(link.to_string_lossy().into_owned()),
+        Ok(()) => Ok(installed),
+        #[cfg(target_os = "macos")]
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             let quote = |p: &std::path::Path| p.to_string_lossy().replace('\'', "'\\''");
             let shell = format!(
                 "mkdir -p '{dir}' && ln -sf '{src}' '{dst}'",
-                dir = CLI_INSTALL_DIR,
+                dir = quote(&dir),
                 src = quote(&source),
                 dst = quote(&link),
             );
@@ -1148,7 +1260,7 @@ pub async fn install_cli() -> Result<String, String> {
                 .await
                 .map_err(|e| e.to_string())?;
             if output.status.success() {
-                Ok(link.to_string_lossy().into_owned())
+                Ok(installed)
             } else {
                 let message = String::from_utf8_lossy(&output.stderr);
                 if message.contains("-128") {
@@ -1164,8 +1276,10 @@ pub async fn install_cli() -> Result<String, String> {
 
 #[cfg(not(unix))]
 #[tauri::command]
-pub async fn install_cli() -> Result<String, String> {
-    Err(format!("Add the folder that holds {} to your PATH to use it as {}", CLI_NAME, CLI_COMMAND))
+pub async fn install_cli() -> Result<CliInstall, String> {
+    let source = bundled_cli()?;
+    let dir = source.parent().ok_or("The app has no folder")?;
+    Err(format!("Add {} to your PATH to use {}", dir.display(), CLI_NAME))
 }
 
 pub const MIRROR_LABEL_PREFIX: &str = "mirror-";
@@ -1193,6 +1307,11 @@ pub struct WindowBounds {
 }
 
 /// Opens the phone's mirror window, or brings it forward when it is already open.
+#[tauri::command]
+pub fn set_record_feed(window: WebviewWindow, enabled: bool) {
+    video::set_record_feed(window.label(), enabled);
+}
+
 #[tauri::command]
 pub async fn open_mirror(
     app: AppHandle,
