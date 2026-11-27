@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use tokio::process::Command;
 
 #[cfg(windows)]
@@ -10,6 +11,9 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static REFRESH_RATES: OnceLock<Mutex<HashMap<String, f32>>> = OnceLock::new();
+
+const REFRESH_RATE_KEYS: [&str; 4] = ["fps=", "renderFrameRate ", "refreshRate=", "refreshRate "];
 
 pub fn set_resource_dir(path: PathBuf) {
     let _ = RESOURCE_DIR.set(path);
@@ -153,6 +157,10 @@ pub async fn shell(serial: &str, cmd: &str) -> Result<tokio::process::Child> {
     Ok(child)
 }
 
+pub async fn shell_text(serial: &str, cmd: &str) -> Result<String> {
+    run_adb_text(&["-s", serial, "shell", cmd]).await
+}
+
 pub async fn reverse(serial: &str, remote: &str, local_port: u16) -> Result<()> {
     run_adb(&[
         "-s",
@@ -255,4 +263,56 @@ pub async fn get_device_ip(serial: &str) -> Result<Option<String>> {
     }
 
     Ok(None)
+}
+
+pub fn parse_peak_refresh_rate(dumpsys_display: &str) -> Option<f32> {
+    let mut peak: Option<f32> = None;
+    for key in REFRESH_RATE_KEYS {
+        for (idx, _) in dumpsys_display.match_indices(key) {
+            let rest = &dumpsys_display[idx + key.len()..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .unwrap_or(rest.len());
+            if let Ok(rate) = rest[..end].parse::<f32>() {
+                if rate > 0.0 && peak.is_none_or(|p| rate > p) {
+                    peak = Some(rate);
+                }
+            }
+        }
+    }
+    peak
+}
+
+pub async fn peak_refresh_rate(serial: &str) -> Option<f32> {
+    let cache = REFRESH_RATES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(rate) = cache.lock().ok()?.get(serial) {
+        return Some(*rate);
+    }
+    let output = run_adb_text(&["-s", serial, "shell", "dumpsys", "display"]).await.ok()?;
+    let rate = parse_peak_refresh_rate(&output)?;
+    cache.lock().ok()?.insert(serial.to_string(), rate);
+    Some(rate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_peak_refresh_rate;
+
+    #[test]
+    fn picks_the_highest_supported_mode() {
+        let dump = "DisplayModeRecord{mMode={id=1, width=1080, height=2400, fps=60.0}}\n\
+                    DisplayModeRecord{mMode={id=2, width=1080, height=2400, fps=120.00001}}";
+        assert_eq!(parse_peak_refresh_rate(dump).map(f32::round), Some(120.0));
+    }
+
+    #[test]
+    fn reads_render_frame_rate_and_older_fields() {
+        assert_eq!(parse_peak_refresh_rate("renderFrameRate 90.0"), Some(90.0));
+        assert_eq!(parse_peak_refresh_rate("mRefreshRate=60.0 refreshRate=60.0"), Some(60.0));
+    }
+
+    #[test]
+    fn unknown_output_gives_none() {
+        assert_eq!(parse_peak_refresh_rate("Display Devices: size=1"), None);
+    }
 }

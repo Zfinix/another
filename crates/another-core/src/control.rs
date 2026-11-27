@@ -1,7 +1,7 @@
+use crate::transport::DeviceStream;
 use anyhow::Result;
 use byteorder::{BigEndian, WriteBytesExt};
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 const MSG_TYPE_INJECT_KEYCODE: u8 = 0;
@@ -11,6 +11,9 @@ const MSG_TYPE_INJECT_SCROLL: u8 = 3;
 #[allow(dead_code)]
 const MSG_TYPE_BACK_OR_SCREEN_ON: u8 = 4;
 const MSG_TYPE_ROTATE_DEVICE: u8 = 11;
+const MSG_TYPE_SET_VIDEO_BIT_RATE: u8 = 100;
+const MSG_TYPE_REQUEST_KEY_FRAME: u8 = 101;
+const MSG_TYPE_SET_VIDEO_SIZE: u8 = 102;
 
 pub const KEYCODE_HOME: u32 = 3;
 pub const KEYCODE_BACK: u32 = 4;
@@ -50,7 +53,7 @@ fn build_touch_msg(action: &str, x: u32, y: u32, screen_w: u16, screen_h: u16) -
 }
 
 pub async fn inject_touch(
-    socket: &Mutex<TcpStream>,
+    socket: &Mutex<DeviceStream>,
     action: &str,
     x: u32,
     y: u32,
@@ -64,7 +67,7 @@ pub async fn inject_touch(
 }
 
 pub async fn inject_keycode(
-    socket: &Mutex<TcpStream>,
+    socket: &Mutex<DeviceStream>,
     action: &str,
     keycode: u32,
     repeat: u32,
@@ -82,7 +85,7 @@ pub async fn inject_keycode(
     Ok(())
 }
 
-pub async fn inject_text(socket: &Mutex<TcpStream>, text: &str) -> Result<()> {
+pub async fn inject_text(socket: &Mutex<DeviceStream>, text: &str) -> Result<()> {
     let bytes = text.as_bytes();
     let mut buf: Vec<u8> = Vec::with_capacity(5 + bytes.len());
     WriteBytesExt::write_u8(&mut buf, MSG_TYPE_INJECT_TEXT).unwrap();
@@ -94,7 +97,33 @@ pub async fn inject_text(socket: &Mutex<TcpStream>, text: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn rotate_device(socket: &Mutex<TcpStream>) -> Result<()> {
+pub async fn set_video_bit_rate(socket: &Mutex<DeviceStream>, bit_rate: u32) -> Result<()> {
+    let mut buf = Vec::with_capacity(5);
+    buf.push(MSG_TYPE_SET_VIDEO_BIT_RATE);
+    buf.extend_from_slice(&bit_rate.to_be_bytes());
+    let mut stream = socket.lock().await;
+    stream.write_all(&buf).await?;
+    Ok(())
+}
+
+/// Restarts the encoder with a new max size and fps (0 keeps the device's native size). Another server only.
+pub async fn set_video_size(socket: &Mutex<DeviceStream>, max_size: u16, max_fps: u16) -> Result<()> {
+    let mut buf = Vec::with_capacity(5);
+    buf.push(MSG_TYPE_SET_VIDEO_SIZE);
+    buf.extend_from_slice(&max_size.to_be_bytes());
+    buf.extend_from_slice(&max_fps.to_be_bytes());
+    let mut stream = socket.lock().await;
+    stream.write_all(&buf).await?;
+    Ok(())
+}
+
+pub async fn request_key_frame(socket: &Mutex<DeviceStream>) -> Result<()> {
+    let mut stream = socket.lock().await;
+    stream.write_all(&[MSG_TYPE_REQUEST_KEY_FRAME]).await?;
+    Ok(())
+}
+
+pub async fn rotate_device(socket: &Mutex<DeviceStream>) -> Result<()> {
     let buf = vec![MSG_TYPE_ROTATE_DEVICE];
     let mut stream = socket.lock().await;
     stream.write_all(&buf).await?;
@@ -102,7 +131,7 @@ pub async fn rotate_device(socket: &Mutex<TcpStream>) -> Result<()> {
 }
 
 pub async fn inject_scroll(
-    socket: &Mutex<TcpStream>,
+    socket: &Mutex<DeviceStream>,
     x: u32,
     y: u32,
     screen_w: u16,
