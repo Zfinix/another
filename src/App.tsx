@@ -8,7 +8,7 @@ import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { Settings, Device, QuickActionId, DevSettings, Profile, RemoteCommand, View, TailnetPeer } from "./types";
 import { PRESETS, DEFAULT_PINNED_ACTIONS, DEFAULT_DEV_SETTINGS, QUICK_ACTION_ORDER, setDeviceNickname } from "./types";
 import { isNetworkSerial } from "@/lib/utils";
-import { deviceKind, deviceMaker, deviceName, getDeviceInfo, hasDeviceInfo, peerMaker, prettyModel, resolutionLabel, setDeviceInfo, KIND_ICON, KIND_PATH, type DeviceInfo } from "@/lib/devices";
+import { describeFacts, deviceKind, deviceMaker, deviceName, getDeviceInfo, hasDeviceInfo, peerMaker, prettyModel, resolutionLabel, setDeviceInfo, KIND_ICON, KIND_PATH, type DeviceInfo } from "@/lib/devices";
 import { useTheme } from "./hooks/useTheme";
 import { useToasts } from "./hooks/useToasts";
 import { useDevices } from "./hooks/useDevices";
@@ -19,6 +19,7 @@ import { useConnection } from "./hooks/useConnection";
 import { useAdaptiveBitrate } from "./hooks/useAdaptiveBitrate";
 import { useMacro } from "./hooks/useMacro";
 import { useLatencyProbe } from "./hooks/useLatencyProbe";
+import { useDeviceFacts } from "./hooks/useDeviceFacts";
 import { useProfiles, sanitizeProfile } from "./hooks/useProfiles";
 import { useUpdater } from "./hooks/useUpdater";
 import { useWindowDrag } from "./hooks/useWindowDrag";
@@ -451,6 +452,7 @@ function App() {
 
   const selectedDevice = view?.kind === "device" ? devices.find((d) => d.serial === view.serial) ?? null : null;
   const selectedPeer = view?.kind === "tailnet" ? peers.find((p) => p.address === view.address) ?? null : null;
+  const deviceFacts = useDeviceFacts(selectedDevice?.state === "device" ? selectedDevice.serial : null);
 
   useEffect(() => {
     if (!devicesLoaded) return;
@@ -764,6 +766,7 @@ function App() {
           status="Ready"
           detail={`${version ? `Android ${version}` : prettyModel(selectedDevice.model)} · ${selectedDevice.serial}`}
           preview={previews.preview(selectedDevice.serial)}
+          facts={deviceFacts ? describeFacts(deviceFacts) : undefined}
           connection={{ icon: KIND_ICON[kind], value: pathLabel(selectedDevice), healthy: true }}
           latency={latency ? `${latency} ms` : "Not measured"}
           stream={streamSummary(kind === "wifi")}
