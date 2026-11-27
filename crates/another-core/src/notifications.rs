@@ -7,9 +7,12 @@ pub struct PhoneNotification {
     pub title: String,
     pub text: String,
     pub posted_ms: u64,
+    /// Set by apps that update a notification in place, such as progress, so only its first post alerts.
+    pub alert_once: bool,
 }
 
 const SKIPPED_FLAGS: [&str; 3] = ["ONGOING_EVENT", "FOREGROUND_SERVICE", "GROUP_SUMMARY"];
+const ALERT_ONCE_FLAG: &str = "ONLY_ALERT_ONCE";
 const SYSTEM_PACKAGES: [&str; 2] = ["android", "com.android.systemui"];
 
 /// Parses `dumpsys notification --noredact` into the notifications a person would see in the shade.
@@ -39,7 +42,14 @@ pub fn parse_dumpsys(output: &str) -> Vec<PhoneNotification> {
                 .and_then(|k| k.split(": Notification(").next())
                 .unwrap_or_default()
                 .to_string();
-            current = Some(PhoneNotification { key, package, title: String::new(), text: String::new(), posted_ms: 0 });
+            current = Some(PhoneNotification {
+                key,
+                package,
+                title: String::new(),
+                text: String::new(),
+                posted_ms: 0,
+                alert_once: false,
+            });
             continue;
         }
         let Some(record) = current.as_mut() else {
@@ -49,6 +59,7 @@ pub fn parse_dumpsys(output: &str) -> Vec<PhoneNotification> {
             if SKIPPED_FLAGS.iter().any(|f| flags.split('|').any(|x| x == *f)) {
                 skip = true;
             }
+            record.alert_once = flags.split('|').any(|x| x == ALERT_ONCE_FLAG);
         } else if let Some(value) = extra(trimmed, "android.title=") {
             record.title = value;
         } else if let Some(value) = extra(trimmed, "android.text=") {
@@ -87,8 +98,8 @@ mod tests {
                 android.title=String (Your sign-in code)
                 android.text=SpannableString (482913 is your code (expires soon))
       mCreationTimeMs=1795766264084
-    NotificationRecord(0x0c2407d2: pkg=com.whatsapp user=UserHandle{0} id=4 tag=null importance=4 key=0|com.whatsapp|4|null|10200: Notification(channel=msg flags=AUTO_CANCEL))
-      flags=AUTO_CANCEL
+    NotificationRecord(0x0c2407d2: pkg=com.whatsapp user=UserHandle{0} id=4 tag=null importance=4 key=0|com.whatsapp|4|null|10200: Notification(channel=msg flags=AUTO_CANCEL|ONLY_ALERT_ONCE))
+      flags=AUTO_CANCEL|ONLY_ALERT_ONCE
                 android.title=String (Family)
                 android.text=null
       mCreationTimeMs=1795766269000
@@ -112,6 +123,15 @@ mod tests {
         assert_eq!(gmail.title, "Your sign-in code");
         assert_eq!(gmail.text, "482913 is your code (expires soon)");
         assert_eq!(gmail.key, "0|com.google.android.gm|19|null|10123");
+    }
+
+    #[test]
+    fn parse_dumpsys_reads_the_alert_once_flag() {
+        let parsed = parse_dumpsys(SAMPLE);
+        let whatsapp = parsed.iter().find(|n| n.package == "com.whatsapp").unwrap();
+        let gmail = parsed.iter().find(|n| n.package == "com.google.android.gm").unwrap();
+        assert!(whatsapp.alert_once);
+        assert!(!gmail.alert_once);
     }
 
     #[test]

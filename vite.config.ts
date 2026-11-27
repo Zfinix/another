@@ -32,8 +32,8 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell Vite to ignore watching `src-tauri` and agent worktrees, which would reload the page mid-mirror
+      ignored: ["**/src-tauri/**", `${path.resolve(__dirname, ".claude")}/**`],
     },
   },
 }));

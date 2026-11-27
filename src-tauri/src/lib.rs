@@ -20,12 +20,15 @@ use serde_json::{json, Value};
 use state::AppState;
 use std::sync::Arc;
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
-use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri::webview::{PageLoadEvent, Webview};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, RunEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 /// `--profile <file>` applies a saved profile at launch and `--connect <serial>` connects to a device.
+/// Both go out as one command, so the connect uses the profile's settings.
 fn launch_commands(args: &[String]) -> Vec<Value> {
-    let mut commands = Vec::new();
+    let mut profile = None;
+    let mut connect = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -34,37 +37,45 @@ fn launch_commands(args: &[String]) -> Vec<Value> {
                 match std::fs::read_to_string(path)
                     .map_err(anyhow::Error::from)
                     .and_then(|text| Ok(serde_json::from_str::<Value>(&text)?))
-                    .and_then(|profile| remote::normalize_command(json!({ "action": "apply", "profile": profile })))
+                    .and_then(|value| another_core::profile::validate(&value))
                 {
-                    Ok(command) => commands.push(command),
+                    Ok(value) => profile = Some(value),
                     Err(e) => eprintln!("[launch] ignoring profile {}: {}", path, e),
                 }
             }
             "--connect" => {
                 if let Some(serial) = iter.next() {
-                    commands.push(json!({ "action": "connect", "serial": serial }));
+                    connect = Some(serial.clone());
                 }
             }
             _ => {}
         }
     }
-    commands
+    let command = match (profile, connect) {
+        (Some(profile), connect) => json!({ "action": "apply", "profile": profile, "connect": connect }),
+        (None, Some(serial)) => json!({ "action": "connect", "serial": serial }),
+        (None, None) => return Vec::new(),
+    };
+    match remote::normalize_command(command) {
+        Ok(command) => vec![command],
+        Err(e) => {
+            eprintln!("[launch] {}", e);
+            Vec::new()
+        }
+    }
 }
 
 /// `another://connect?serial=X`, `another://set?native_video=true&connect=X` and
-/// `another://apply?profile=<base64url JSON>&connect=X`.
-fn deep_link_commands(url: &tauri::Url) -> anyhow::Result<Vec<Value>> {
+/// `another://apply?profile=<base64url JSON>&connect=X`, as one command so a connect uses the new settings.
+fn deep_link_command(url: &tauri::Url) -> anyhow::Result<Value> {
     use base64::Engine;
     let pairs: Vec<(String, String)> = url.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
     let connect = pairs.iter().find(|(k, _)| k == "connect" || k == "serial").map(|(_, v)| v.clone());
-    let action = url.host_str().unwrap_or_default();
-    let mut commands = Vec::new();
-    match action {
-        "connect" => {}
+    let profile = match url.host_str().unwrap_or_default() {
+        "connect" => return remote::normalize_command(json!({ "action": "connect", "serial": connect })),
         "set" => {
             let assignments = pairs.iter().filter(|(k, _)| k != "connect" && k != "serial");
-            let profile = another_core::profile::from_assignments(assignments.map(|(k, v)| (k.as_str(), v.as_str())))?;
-            commands.push(json!({ "action": "apply", "profile": profile }));
+            another_core::profile::from_assignments(assignments.map(|(k, v)| (k.as_str(), v.as_str())))?
         }
         "apply" => {
             let encoded = pairs
@@ -73,23 +84,58 @@ fn deep_link_commands(url: &tauri::Url) -> anyhow::Result<Vec<Value>> {
                 .map(|(_, v)| v.clone())
                 .ok_or_else(|| anyhow::anyhow!("another://apply needs a profile"))?;
             let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded.trim_end_matches('='))?;
-            let profile: Value = serde_json::from_slice(&bytes)?;
-            commands.push(remote::normalize_command(json!({ "action": "apply", "profile": profile }))?);
+            serde_json::from_slice(&bytes)?
         }
         other => return Err(anyhow::anyhow!("Unknown deep link action '{}'", other)),
+    };
+    let command = remote::normalize_command(json!({ "action": "apply", "profile": profile, "connect": connect }))?;
+    if command["profile"].get("stream").is_none() && command["profile"].get("dev").is_none() {
+        return match connect {
+            Some(serial) => remote::normalize_command(json!({ "action": "connect", "serial": serial })),
+            None => Err(anyhow::anyhow!("The link does not change anything")),
+        };
     }
-    if let Some(serial) = connect {
-        commands.push(json!({ "action": "connect", "serial": serial }));
-    }
-    Ok(commands)
+    Ok(command)
 }
 
 fn open_deep_links(app: &AppHandle, urls: &[tauri::Url]) {
     for url in urls {
-        match deep_link_commands(url) {
-            Ok(commands) => commands.into_iter().for_each(|command| remote::dispatch(app, command)),
+        match deep_link_command(url) {
+            Ok(command) => remote::dispatch(app, remote::ask_first(command)),
             Err(e) => eprintln!("[deep-link] {}: {}", url, e),
         }
+    }
+}
+
+const MAIN_WINDOW: (f64, f64) = (1120.0, 760.0);
+const MAIN_MIN: (f64, f64) = (720.0, 520.0);
+
+/// A page load starts the UI over with nothing connected, so a mirror session left running from
+/// before (a reload, a crashed webview) is ended, its video layer removed and the window put back
+/// to a size the main layout fits in. Otherwise the last frame lingers behind the sidebar.
+fn reset_after_page_load(webview: &Webview) {
+    native_video::detach();
+    let app = webview.app_handle().clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let session = state.session.lock().await.take();
+        if let Some(s) = session {
+            s.shutdown.notify_one();
+            another_core::scrcpy::stop_server(&s.device_serial, 27183).await;
+        }
+        commands::restore_stay_on(&state.stay_on, None).await;
+    });
+    let window = webview.window();
+    let too_small = match (window.inner_size(), window.scale_factor()) {
+        (Ok(size), Ok(scale)) => {
+            let size = size.to_logical::<f64>(scale);
+            size.width < MAIN_MIN.0 || size.height < MAIN_MIN.1
+        }
+        _ => false,
+    };
+    let _ = window.set_min_size(Some(LogicalSize::new(MAIN_MIN.0, MAIN_MIN.1)));
+    if too_small {
+        let _ = window.set_size(LogicalSize::new(MAIN_WINDOW.0, MAIN_WINDOW.1));
     }
 }
 
@@ -103,6 +149,11 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .manage(AppState::new())
         .manage(Arc::new(RemoteState::default()))
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Started {
+                reset_after_page_load(webview);
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             let remote_state = app.state::<Arc<RemoteState>>().inner().clone();
@@ -179,6 +230,7 @@ pub fn run() {
             commands::rename_macro_file,
             commands::save_macros_order,
             commands::save_file,
+            commands::save_bytes,
             commands::wifi_connect,
             commands::wifi_disconnect,
             commands::tailnet_status,
@@ -208,6 +260,7 @@ pub fn run() {
             commands::install_cli,
             commands::set_window_blur,
             commands::device_info,
+            commands::set_record_feed,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -216,11 +269,13 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 let session = state.session.clone();
                 let mcp = state.mcp.clone();
+                let stay_on = state.stay_on.clone();
                 tauri::async_runtime::block_on(async {
                     if let Some(s) = session.lock().await.take() {
                         s.shutdown.notify_one();
                         another_core::scrcpy::stop_server(&s.device_serial, 27183).await;
                     }
+                    commands::restore_stay_on(&stay_on, None).await;
                     if let Some(ct) = mcp.lock().await.cancel.take() {
                         ct.cancel();
                     }
@@ -235,42 +290,67 @@ mod tests {
     use super::*;
     use base64::Engine;
 
-    fn link(url: &str) -> anyhow::Result<Vec<Value>> {
-        deep_link_commands(&tauri::Url::parse(url).unwrap())
+    fn link(url: &str) -> anyhow::Result<Value> {
+        deep_link_command(&tauri::Url::parse(url).unwrap())
+    }
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn set_link_applies_settings_then_connects() {
-        let commands = link("another://set?native_video=true&max_size=1920&connect=ABC").unwrap();
-        assert_eq!(commands.len(), 2);
-        assert_eq!(commands[0]["action"], "apply");
-        assert_eq!(commands[0]["profile"]["dev"]["nativeVideo"], true);
-        assert_eq!(commands[0]["profile"]["stream"]["max_size"], 1920);
-        assert_eq!(commands[1], json!({ "action": "connect", "serial": "ABC" }));
+    fn set_link_applies_settings_and_connects_in_one_command() {
+        let command = link("another://set?native_video=true&max_size=1920&adaptive_network=false&connect=ABC").unwrap();
+        assert_eq!(command["action"], "apply");
+        assert_eq!(command["profile"]["dev"]["nativeVideo"], true);
+        assert_eq!(command["profile"]["stream"]["max_size"], 1920);
+        assert_eq!(command["profile"]["stream"]["adaptive_network"], false);
+        assert_eq!(command["connect"], "ABC");
     }
 
     #[test]
     fn apply_link_decodes_a_base64url_profile() {
         let profile = json!({ "version": 1, "dev": { "encoderTuning": "intra_refresh" } });
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(profile.to_string());
-        let commands = link(&format!("another://apply?profile={}", encoded)).unwrap();
-        assert_eq!(commands[0]["profile"]["dev"]["encoderTuning"], "intra_refresh");
+        let command = link(&format!("another://apply?profile={}", encoded)).unwrap();
+        assert_eq!(command["profile"]["dev"]["encoderTuning"], "intra_refresh");
+        assert!(command.get("connect").is_none());
     }
 
     #[test]
     fn connect_link_and_bad_links() {
-        assert_eq!(link("another://connect?serial=XYZ").unwrap(), vec![json!({ "action": "connect", "serial": "XYZ" })]);
+        assert_eq!(link("another://connect?serial=XYZ").unwrap(), json!({ "action": "connect", "serial": "XYZ" }));
+        assert_eq!(link("another://set?connect=XYZ").unwrap(), json!({ "action": "connect", "serial": "XYZ" }));
+        assert!(link("another://connect").is_err());
+        assert!(link("another://connect?serial=").is_err());
+        assert!(link("another://set").is_err());
         assert!(link("another://wipe").is_err());
         assert!(link("another://set?resolution=4k").is_err());
         assert!(link("another://apply").is_err());
     }
 
     #[test]
-    fn launch_flags_queue_connect_and_skip_unreadable_profiles() {
-        let args: Vec<String> = ["Another", "--profile", "/nonexistent/profile.json", "--connect", "SER"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(launch_commands(&args), vec![json!({ "action": "connect", "serial": "SER" })]);
+    fn links_always_ask_first() {
+        let command = link("another://connect?serial=XYZ").unwrap();
+        assert_eq!(remote::ask_first(command.clone()), json!({ "action": "link", "command": command }));
+    }
+
+    #[test]
+    fn launch_flags_send_profile_and_device_together() {
+        let path = std::env::temp_dir().join(format!("another-launch-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{ "version": 1, "stream": { "max_size": 1920 } }"#).unwrap();
+        let commands = launch_commands(&args(&["Another", "--profile", path.to_str().unwrap(), "--connect", "SER"]));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0]["action"], "apply");
+        assert_eq!(commands[0]["profile"]["stream"]["max_size"], 1920);
+        assert_eq!(commands[0]["connect"], "SER");
+    }
+
+    #[test]
+    fn launch_flags_skip_unreadable_profiles() {
+        let commands = launch_commands(&args(&["Another", "--profile", "/nonexistent/profile.json", "--connect", "SER"]));
+        assert_eq!(commands, vec![json!({ "action": "connect", "serial": "SER" })]);
+        assert!(launch_commands(&args(&["Another"])).is_empty());
     }
 }

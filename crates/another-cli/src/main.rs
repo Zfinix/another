@@ -87,7 +87,7 @@ enum ProfileCommand {
         #[arg(long)]
         connect: Option<String>,
     },
-    /// Print an another:// link that applies a profile file
+    /// Print an another:// link that applies a profile file once you allow it in Another
     Link {
         file: PathBuf,
         #[arg(long)]

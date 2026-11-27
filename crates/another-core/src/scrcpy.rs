@@ -121,8 +121,8 @@ impl ServerHandle {
     }
 }
 
-const LOW_LATENCY_CODEC_OPTIONS: &str = "latency=1,priority=0,max-bframes=0";
-const KILL_SERVER_CMD: &str = "pkill -f com.genymobile.scrcpy.Server";
+const LOW_LATENCY_CODEC_OPTIONS: &str = "latency=1,priority=0";
+const NO_B_FRAMES_CODEC_OPTION: &str = "max-bframes=0";
 const DIRECT_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 const DIRECT_OPEN_RETRY: Duration = Duration::from_millis(50);
 const NETWORK_PORT_BASE: u16 = 27200;
@@ -131,9 +131,10 @@ const NETWORK_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const NETWORK_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 const NETWORK_TOKEN_LEN: usize = 16;
 
+/// B-frames are always switched off, since the H.264 SPS is rewritten to declare that frames are never reordered.
 fn codec_options(settings: &StreamSettings) -> String {
     if !settings.low_latency {
-        return String::new();
+        return format!(" video_codec_options={}", NO_B_FRAMES_CODEC_OPTION);
     }
     let operating_rate = if settings.max_fps > 0 {
         format!(",operating-rate:float={}", settings.max_fps)
@@ -141,8 +142,9 @@ fn codec_options(settings: &StreamSettings) -> String {
         String::new()
     };
     format!(
-        " video_codec_options={}{}{}",
+        " video_codec_options={},{}{}{}",
         LOW_LATENCY_CODEC_OPTIONS,
+        NO_B_FRAMES_CODEC_OPTION,
         operating_rate,
         settings.encoder_tuning.codec_options()
     )
@@ -247,7 +249,7 @@ async fn start_direct(
 ) -> Result<(ConnectedStreams, ServerHandle)> {
     let mut device = DirectDevice::connect(address).await?;
 
-    let _ = device.exec(KILL_SERVER_CMD).await;
+    let _ = device.exec(adb::KILL_SERVERS_CMD).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     device.push(server_path, SCRCPY_SERVER_REMOTE_PATH).await?;
     device
@@ -304,6 +306,7 @@ async fn start_network(
         + u16::from_be_bytes([secret[NETWORK_TOKEN_LEN], secret[NETWORK_TOKEN_LEN + 1]]) % NETWORK_PORT_RANGE;
     let token_hex: String = token.iter().map(|b| format!("{:02x}", b)).collect();
 
+    adb::kill_mirror_servers(serial).await;
     adb::push_file(serial, server_path, SCRCPY_SERVER_REMOTE_PATH).await?;
     let command = format!(
         "{} listen_port={} token={}",
@@ -415,7 +418,7 @@ async fn start_via_adb_server(
     port: u16,
     settings: &StreamSettings,
 ) -> Result<(ConnectedStreams, ServerHandle)> {
-    adb::kill_scrcpy_server(serial).await;
+    adb::kill_mirror_servers(serial).await;
     adb::remove_forward(serial, port).await?;
 
     adb::push_file(serial, server_path, SCRCPY_SERVER_REMOTE_PATH).await?;
@@ -478,7 +481,7 @@ async fn start_via_adb_server(
 
 pub async fn stop_server(serial: &str, _port: u16) {
     let _ = adb::remove_reverse(serial, "localabstract:scrcpy").await;
-    adb::kill_scrcpy_server(serial).await;
+    adb::kill_mirror_servers(serial).await;
 }
 
 #[cfg(test)]
@@ -494,8 +497,25 @@ mod tests {
     }
 
     #[test]
-    fn no_codec_options_without_low_latency() {
-        assert_eq!(codec_options(&settings(false, EncoderTuning::ConstantBitrate)), "");
+    fn b_frames_are_off_without_low_latency() {
+        assert_eq!(
+            codec_options(&settings(false, EncoderTuning::ConstantBitrate)),
+            " video_codec_options=max-bframes=0"
+        );
+    }
+
+    #[test]
+    fn both_servers_turn_b_frames_off() {
+        for another_server in [false, true] {
+            for low_latency in [false, true] {
+                let settings = StreamSettings {
+                    another_server,
+                    low_latency,
+                    ..StreamSettings::default()
+                };
+                assert!(super::server_command(&settings, false).contains("max-bframes=0"));
+            }
+        }
     }
 
     #[test]
@@ -515,6 +535,13 @@ mod tests {
         let command = super::server_command(&settings, true);
         assert!(command.contains("app_process / dev.another.server.Main another-1 "));
         assert!(command.contains(" max_queued_frames=6"));
+    }
+
+    #[test]
+    fn kill_command_matches_both_servers() {
+        let pattern = crate::adb::KILL_SERVERS_CMD.replace(['[', ']'], "");
+        assert!(pattern.contains(super::SCRCPY_SERVER_MAIN));
+        assert!(pattern.contains(super::ANOTHER_SERVER_MAIN));
     }
 
     #[test]

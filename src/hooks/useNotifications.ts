@@ -8,6 +8,7 @@ export interface PhoneNotification {
   title: string;
   text: string;
   posted_ms: number;
+  alert_once: boolean;
 }
 
 export interface Banner extends PhoneNotification {
@@ -16,6 +17,7 @@ export interface Banner extends PhoneNotification {
 }
 
 const POLL_MS = 4000;
+const MIRRORING_POLL_MS = 30000;
 const BANNER_MS = 8000;
 const MAX_BANNERS = 3;
 const CODE_PATTERN = /(?:code|otp|pin|passcode|verification|verify|sign-in|login)/i;
@@ -58,6 +60,10 @@ export function timeAgo(ms: number, now = Date.now()): string {
   return hours < 24 ? `${hours} h` : `${Math.floor(hours / 24)} d`;
 }
 
+function contentOf(n: PhoneNotification) {
+  return `${n.title}\n${n.text}`;
+}
+
 function readFlag(key: string, fallback: boolean) {
   const stored = localStorage.getItem(key);
   return stored === null ? fallback : stored === "true";
@@ -66,14 +72,16 @@ function readFlag(key: string, fallback: boolean) {
 interface Options {
   serial: string | null;
   deviceName: string;
+  mirroring: boolean;
 }
 
-export function useNotifications({ serial, deviceName }: Options) {
+export function useNotifications({ serial, deviceName, mirroring }: Options) {
   const [items, setItems] = useState<PhoneNotification[]>([]);
   const [banners, setBanners] = useState<Banner[]>([]);
   const [systemCenter, setSystemCenterState] = useState(() => readFlag("notify_system", true));
   const [offerCodes, setOfferCodesState] = useState(() => readFlag("notify_codes", true));
-  const seen = useRef<Set<string> | null>(null);
+  const seen = useRef<Map<string, string> | null>(null);
+  const wasMirroring = useRef(mirroring);
   const optionsRef = useRef({ systemCenter, offerCodes, deviceName });
   optionsRef.current = { systemCenter, offerCodes, deviceName };
 
@@ -98,6 +106,11 @@ export function useNotifications({ serial, deviceName }: Options) {
     seen.current = null;
     setItems([]);
     setBanners([]);
+  }, [serial]);
+
+  useEffect(() => {
+    let quiet = wasMirroring.current && !mirroring;
+    wasMirroring.current = mirroring;
     if (!serial) return;
     let stopped = false;
 
@@ -107,27 +120,35 @@ export function useNotifications({ serial, deviceName }: Options) {
         if (stopped) return;
         setItems(list);
         const known = seen.current;
-        seen.current = new Set(list.map((n) => n.key));
-        if (!known) return;
-        const fresh = list.filter((n) => !known.has(n.key));
+        seen.current = new Map(list.map((n) => [n.key, contentOf(n)]));
+        if (!known || quiet) {
+          quiet = false;
+          return;
+        }
+        const fresh = list.filter((n) => {
+          const before = known.get(n.key);
+          return before === undefined || (before !== contentOf(n) && !n.alert_once);
+        });
         if (fresh.length === 0) return;
         const { systemCenter: toCenter, offerCodes: codes, deviceName: name } = optionsRef.current;
         const next = fresh.map((n) => ({ ...n, device: name, code: codes ? oneTimeCode(n) : null }));
-        setBanners((prev) => [...next, ...prev].slice(0, MAX_BANNERS));
-        next.forEach((b) => setTimeout(() => dismissBanner(b.key), BANNER_MS));
+        if (!mirroring) {
+          setBanners((prev) => [...next, ...prev.filter((b) => !next.some((n) => n.key === b.key))].slice(0, MAX_BANNERS));
+          next.forEach((b) => setTimeout(() => setBanners((prev) => prev.filter((p) => p !== b)), BANNER_MS));
+        }
         if (toCenter && !document.hasFocus()) {
           next.forEach((n) => sendNotification({ title: `${appName(n.package)} · ${n.title}`, body: n.text || name }));
         }
       } catch { }
     };
 
-    poll();
-    const timer = setInterval(poll, POLL_MS);
+    if (!mirroring) poll();
+    const timer = setInterval(poll, mirroring ? MIRRORING_POLL_MS : POLL_MS);
     return () => {
       stopped = true;
       clearInterval(timer);
     };
-  }, [serial, dismissBanner]);
+  }, [serial, mirroring]);
 
   return { items, banners, dismissBanner, systemCenter, setSystemCenter, offerCodes, setOfferCodes };
 }

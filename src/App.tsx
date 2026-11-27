@@ -5,7 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { downloadDir } from "@tauri-apps/api/path";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { Settings, Device, QuickActionId, DevSettings, Profile, RemoteCommand, View, TailnetPeer } from "./types";
+import type { Settings, Device, QuickActionId, DevSettings, Profile, LinkCommand, RemoteCommand, View, TailnetPeer } from "./types";
 import { PRESETS, DEFAULT_PINNED_ACTIONS, DEFAULT_DEV_SETTINGS, QUICK_ACTION_ORDER, setDeviceNickname } from "./types";
 import { isNetworkSerial } from "@/lib/utils";
 import { deviceKind, deviceMaker, deviceName, getDeviceInfo, hasDeviceInfo, peerMaker, prettyModel, resolutionLabel, setDeviceInfo, KIND_ICON, KIND_PATH, type DeviceInfo } from "@/lib/devices";
@@ -19,7 +19,7 @@ import { useConnection } from "./hooks/useConnection";
 import { useAdaptiveBitrate } from "./hooks/useAdaptiveBitrate";
 import { useMacro } from "./hooks/useMacro";
 import { useLatencyProbe } from "./hooks/useLatencyProbe";
-import { useProfiles, sanitizeProfile } from "./hooks/useProfiles";
+import { useProfiles, sanitizeProfile, describeProfile } from "./hooks/useProfiles";
 import { useUpdater } from "./hooks/useUpdater";
 import { useWindowDrag } from "./hooks/useWindowDrag";
 import { Sidebar, type DeviceActions } from "./components/Sidebar";
@@ -34,6 +34,7 @@ import { SettingsDialog, type SettingsPane, type NetworkPrefs } from "./componen
 import { ConnectDialog, rememberAddress } from "./components/ConnectDialog";
 import { CommandBar, type CommandDef } from "./components/CommandBar";
 import { ToastContainer } from "./components/ToastContainer";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { WhatsNew } from "./components/WhatsNew";
 import { LATEST_NEWS, dismissNews, isNewsDismissed, type News } from "@/lib/news";
 
@@ -48,7 +49,6 @@ interface KeyedCommand extends CommandDef {
 const LIVE_KEYS: (keyof Settings)[] = ["video_bit_rate", "max_size", "max_fps"];
 const LIVE_SIZE_DEBOUNCE_MS = 300;
 const RECONNECT_DEV_KEYS: (keyof DevSettings)[] = ["directAdb", "lowLatency", "encoderTuning", "anotherServer", "nativeVideo", "networkStream"];
-const STAY_ON_ALL_SOURCES = "7";
 const MAX_GLASS_BLUR_PX = 60;
 const BLUR_APPLY_DEBOUNCE_MS = 40;
 const PRESET_LABELS: Record<string, string> = { performance: "Performance", balanced: "Balanced", quality: "Quality" };
@@ -211,6 +211,7 @@ function App() {
     onNativeStats: (fps, lagMinMs) => adaptiveRef.current.nativeSample(fps, lagMinMs),
     onCodecFallback: handleCodecFallback,
     onRecordEvent: macro.recordEvent,
+    onRecordingSaved: refreshRecordings,
     perfOverlay: devSettings.perfOverlay,
     directAdb: devSettings.directAdb,
     lowLatency: devSettings.lowLatency,
@@ -333,9 +334,25 @@ function App() {
     connectToDevice(device, s, false, dev);
   };
 
+  const [linkQueue, setLinkQueue] = useState<LinkCommand[]>([]);
+  const linkCommand = linkQueue[0] ?? null;
+
+  const describeLink = (command: LinkCommand): string => {
+    const serial = command.action === "connect" ? command.serial : command.connect;
+    const device = devicesRef.current.find((d) => d.serial === serial);
+    const changes = command.action === "apply" ? describeProfile(command.profile) : [];
+    const steps = [
+      ...(changes.length ? [`change ${changes.join(", ")}`] : []),
+      ...(serial ? [`connect to ${device ? `${deviceName(device)} (${serial})` : serial}`] : []),
+    ];
+    return `A link wants to ${steps.join(" and ")}. Only allow links you trust.`;
+  };
+
   const remoteHandlerRef = useRef<(command: RemoteCommand) => void>(() => { });
   remoteHandlerRef.current = (command) => {
-    if (command.action === "apply") {
+    if (command.action === "link") {
+      setLinkQueue((queue) => [...queue, command.command]);
+    } else if (command.action === "apply") {
       const next = applyProfile(command.profile, !command.connect);
       if (command.connect) connectBySerial(command.connect, next.settings, next.dev);
     } else if (command.action === "connect") {
@@ -384,20 +401,13 @@ function App() {
     updater.checkForUpdates(true);
   }, []);
 
-  const stayOnPrevious = useRef<{ serial: string; value: string } | null>(null);
-
   const restoreStayOn = useCallback(() => {
-    const previous = stayOnPrevious.current;
-    stayOnPrevious.current = null;
-    if (previous) invoke("set_stay_on", { serial: previous.serial, value: previous.value }).catch(() => { });
+    invoke("set_stay_on", { serial: null }).catch(() => { });
   }, []);
 
   useEffect(() => {
-    if (screen !== "another" || !connectedDevice || !stayAwake || stayOnPrevious.current) return;
-    const serial = connectedDevice.serial;
-    invoke<string>("set_stay_on", { serial, value: STAY_ON_ALL_SOURCES })
-      .then((value) => { stayOnPrevious.current = { serial, value: value === "null" ? "0" : value }; })
-      .catch(() => { });
+    if (screen !== "another" || !connectedDevice || !stayAwake) return;
+    invoke("set_stay_on", { serial: connectedDevice.serial }).catch(() => { });
   }, [screen, connectedDevice, stayAwake]);
 
   useEffect(() => {
@@ -469,7 +479,7 @@ function App() {
   }, [selectedDevice?.serial, selectedDevice?.state, screen]);
 
   const onlineDevice = connectedDevice ?? (selectedDevice?.state === "device" ? selectedDevice : devices.find((d) => d.state === "device") ?? null);
-  const notifications = useNotifications({ serial: onlineDevice?.serial ?? null, deviceName: onlineDevice ? deviceName(onlineDevice) : "" });
+  const notifications = useNotifications({ serial: onlineDevice?.serial ?? null, deviceName: onlineDevice ? deviceName(onlineDevice) : "", mirroring: !!connectedDevice || !!connectingSerial });
 
   const copyCode = (code: string) => {
     navigator.clipboard.writeText(code);
@@ -568,11 +578,7 @@ function App() {
     }
   };
 
-  const toggleRecording = () => {
-    const wasRecording = connection.recording;
-    connection.toggleRecording();
-    if (wasRecording) setTimeout(refreshRecordings, 1500);
-  };
+  const toggleRecording = connection.toggleRecording;
 
   const togglePin = (id: QuickActionId) => {
     const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
@@ -913,6 +919,15 @@ function App() {
       />
       <CommandBar open={showCommandBar} onOpenChange={setShowCommandBar} commands={commands} />
       <NotificationBanners banners={notifications.banners} onDismiss={notifications.dismissBanner} onCopyCode={copyCode} onOpen={openOnPhone} />
+      <ConfirmDialog
+        open={!!linkCommand}
+        title="Allow this link?"
+        detail={linkCommand ? describeLink(linkCommand) : ""}
+        action="Allow"
+        danger={false}
+        onCancel={() => setLinkQueue((queue) => queue.slice(1))}
+        onConfirm={() => { if (linkCommand) remoteHandlerRef.current(linkCommand); setLinkQueue((queue) => queue.slice(1)); }}
+      />
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </>
   );

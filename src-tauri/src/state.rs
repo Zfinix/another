@@ -20,9 +20,16 @@ pub struct McpServerState {
     pub port: u16,
 }
 
+/// A phone whose `stay_on_while_plugged_in` setting Another changed, with the value to put back.
+pub struct StayOn {
+    pub serial: String,
+    pub previous: String,
+}
+
 pub struct AppState {
     pub session: Arc<Mutex<Option<ScrcpySession>>>,
     pub mcp: Arc<Mutex<McpServerState>>,
+    pub stay_on: Arc<Mutex<Option<StayOn>>>,
 }
 
 impl AppState {
@@ -33,6 +40,7 @@ impl AppState {
                 cancel: None,
                 port: 7070,
             })),
+            stay_on: Arc::new(Mutex::new(None)),
         }
     }
 }

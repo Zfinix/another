@@ -54,13 +54,13 @@ pub fn radius_for(percent: u32) -> u32 {
     (percent * MAX_RADIUS / 100).max(MIN_RADIUS)
 }
 
-pub fn set_blur(window: &WebviewWindow, percent: u32) -> Result<()> {
+pub async fn set_blur(window: &WebviewWindow, percent: u32) -> Result<()> {
     let functions = functions().ok_or_else(|| anyhow!("This macOS version does not allow a custom window blur"))?;
     let ns_window = window.ns_window().map_err(|e| anyhow!("No native window: {}", e))? as usize;
     let radius = radius_for(percent);
     let set_blur = functions.set_blur;
     let connection = functions.connection;
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = tokio::sync::oneshot::channel();
     window
         .run_on_main_thread(move || {
             let result = unsafe {
@@ -76,7 +76,7 @@ pub fn set_blur(window: &WebviewWindow, percent: u32) -> Result<()> {
             let _ = tx.send(result);
         })
         .map_err(|e| anyhow!("Could not reach the main thread: {}", e))?;
-    match rx.recv() {
+    match rx.await {
         Ok(0) => Ok(()),
         Ok(code) => Err(anyhow!("macOS refused the blur radius ({})", code)),
         Err(_) => Err(anyhow!("The blur was not applied")),
