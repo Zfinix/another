@@ -19,11 +19,25 @@ export interface Device {
   wifi_available?: boolean;
 }
 
-export interface Toast {
+export type ToastType = "error" | "info" | "success";
+
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
+export interface ToastOptions {
+  detail?: string;
+  action?: ToastAction;
+}
+
+export interface Toast extends ToastOptions {
   id: number;
   message: string;
-  type: "error" | "info";
+  type: ToastType;
 }
+
+export type ShowToast = (message: string, type?: ToastType, options?: ToastOptions) => void;
 
 export interface Settings {
   max_size: number;
@@ -179,19 +193,11 @@ export const CODEC_OPTIONS = [
   { value: "h264", label: "H.264" },
 ];
 
-export type QuickActionId = "record" | "mute" | "volume_up" | "volume_down" | "power" | "macro-toggle" | "rotate";
+export type QuickActionId = "screenshot" | "record" | "stats" | "mute" | "rotate";
 
-export const QUICK_ACTIONS: { id: QuickActionId; label: string }[] = [
-  { id: "record", label: "Record" },
-  { id: "mute", label: "Mute" },
-  { id: "volume_up", label: "Vol+" },
-  { id: "volume_down", label: "Vol-" },
-  { id: "power", label: "Power" },
-  { id: "macro-toggle", label: "Macro" },
-  { id: "rotate", label: "Rotate" },
-];
+export const QUICK_ACTION_ORDER: QuickActionId[] = ["screenshot", "record", "stats", "mute", "rotate"];
 
-export const DEFAULT_PINNED_ACTIONS: QuickActionId[] = [];
+export const DEFAULT_PINNED_ACTIONS: QuickActionId[] = ["record", "stats"];
 
 export interface AdaptiveTier {
   max_size: number;
@@ -207,3 +213,11 @@ export const ADAPTIVE_TIERS: AdaptiveTier[] = [
   { max_size: 1920, max_fps: 60, video_bit_rate: 24000000 },
   { max_size: 1920, max_fps: 120, video_bit_rate: 32000000 },
 ];
+
+export type View =
+  | { kind: "device"; serial: string }
+  | { kind: "tailnet"; address: string }
+  | { kind: "macros" }
+  | { kind: "recordings" }
+  | { kind: "notifications" }
+  | { kind: "agents" };

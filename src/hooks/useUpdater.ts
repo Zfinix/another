@@ -1,7 +1,8 @@
+import type { ShowToast } from "../types";
 import { useState, useCallback } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
-export function useUpdater(showToast: (msg: string, type?: "error" | "info") => void) {
+export function useUpdater(showToast: ShowToast) {
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState(false);
 
@@ -18,18 +19,18 @@ export function useUpdater(showToast: (msg: string, type?: "error" | "info") => 
           return;
         }
         if (update) {
-          showToast(`Update ${update.version} available, downloading...`, "info");
+          showToast(`Downloading Another ${update.version}`, "info");
           setUpdating(true);
           await update.downloadAndInstall((event) => {
             if (event.event === "Finished") {
-              showToast("Update installed. Restart the app to apply.", "info");
+              showToast("Update installed", "success", { detail: "Restart Another to use it" });
             }
           });
         } else if (!silent) {
           showToast("You're on the latest version", "info");
         }
       } catch (e) {
-        if (!silent) showToast(`Update failed: ${e}`);
+        if (!silent) showToast("Could not check for updates", "error", { detail: `${e}` });
       } finally {
         setChecking(false);
         setUpdating(false);

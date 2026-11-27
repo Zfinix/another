@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { MacroEvent, MacroTimedEvent, SavedMacro } from "../types";
+import type { MacroEvent, MacroTimedEvent, SavedMacro, ShowToast } from "../types";
 
 export interface MacroInfo {
   name: string;
@@ -8,7 +8,7 @@ export interface MacroInfo {
 }
 
 interface UseMacroOptions {
-  showToast: (msg: string, type?: "error" | "info") => void;
+  showToast: ShowToast;
   onRecordingStopped?: () => void;
 }
 
@@ -64,7 +64,7 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
     startTimeRef.current = Date.now();
     recordingRef.current = true;
     setMacroRecording(true);
-    showToast("Macro recording started", "info");
+    showToast("Recording a macro", "info");
   }, [showToast]);
 
   const stopRecording = useCallback(
@@ -79,11 +79,11 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
       eventsRef.current = [];
       try {
         await invoke("save_macro_file", { dir: macrosDir, macroData: macro });
-        showToast(`Macro '${macroName}' saved (${macro.events.length} events)`, "info");
+        showToast(`Saved ${macroName}`, "success", { detail: `${macro.events.length} events` });
         refreshMacros();
         onRecordingStopped?.();
       } catch (e) {
-        showToast(`Failed to save macro: ${e}`);
+        showToast("Could not save the macro", "error", { detail: `${e}` });
       }
     },
     [macros.length, macrosDir, showToast, refreshMacros, onRecordingStopped],
@@ -115,9 +115,9 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
           name,
         });
         await invoke("play_macro", { events: m.events });
-        showToast(`Played macro '${name}'`, "info");
+        showToast(`Ran ${name}`, "success");
       } catch (e) {
-        showToast(`Macro playback failed: ${e}`);
+        showToast(`Could not run ${name}`, "error", { detail: `${e}` });
       } finally {
         setPlayingMacro(null);
       }
@@ -129,10 +129,10 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
     async (name: string) => {
       try {
         await invoke("delete_macro_file", { dir: macrosDir, name });
-        showToast(`Deleted macro '${name}'`, "info");
+        showToast(`Deleted ${name}`, "success");
         refreshMacros();
       } catch (e) {
-        showToast(`Failed to delete: ${e}`);
+        showToast("Could not delete the macro", "error", { detail: `${e}` });
       }
     },
     [macrosDir, showToast, refreshMacros],
@@ -148,7 +148,7 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
         });
         refreshMacros();
       } catch (e) {
-        showToast(`Failed to rename: ${e}`);
+        showToast("Could not rename the macro", "error", { detail: `${e}` });
       }
     },
     [macrosDir, showToast, refreshMacros],
@@ -180,9 +180,9 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
         link.download = `${name.replace(/\s+/g, "_")}.macro.json`;
         link.click();
         URL.revokeObjectURL(url);
-        showToast(`Exported macro '${name}'`, "info");
+        showToast(`Exported ${name}`, "success");
       } catch (e) {
-        showToast(`Export failed: ${e}`);
+        showToast("Could not export", "error", { detail: `${e}` });
       }
     },
     [macrosDir, showToast],
@@ -208,9 +208,9 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
       link.download = `macros-${Date.now()}.json`;
       link.click();
       URL.revokeObjectURL(url);
-      showToast(`Exported ${macros.length} macro(s)`, "info");
+      showToast(`Exported ${macros.length} ${macros.length === 1 ? "macro" : "macros"}`, "success");
     } catch (e) {
-      showToast(`Export failed: ${e}`);
+      showToast("Could not export", "error", { detail: `${e}` });
     }
   }, [macros, macrosDir, showToast]);
 
@@ -229,7 +229,7 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
           (m) => m.name && Array.isArray(m.events),
         );
         if (valid.length === 0) {
-          showToast("No valid macros found in file");
+          showToast("No macros in that file", "error", { detail: "Pick a file exported from Another" });
           return;
         }
         const existingNames = new Set(macros.map((m) => m.name));
@@ -242,10 +242,10 @@ export function useMacro({ showToast, onRecordingStopped }: UseMacroOptions) {
             macroData: { ...m, name },
           });
         }
-        showToast(`Imported ${valid.length} macro(s)`, "info");
+        showToast(`Imported ${valid.length} ${valid.length === 1 ? "macro" : "macros"}`, "success");
         refreshMacros();
       } catch {
-        showToast("Failed to parse macro file");
+        showToast("Could not read that file", "error", { detail: "Pick a file exported from Another" });
       }
     };
     input.click();

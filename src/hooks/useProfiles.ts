@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import type { DevSettings, Profile, Settings } from "../types";
+import type { DevSettings, Profile, Settings, ShowToast } from "../types";
 import { DEFAULT_DEV_SETTINGS, PRESETS, PROFILE_VERSION } from "../types";
 
 function pickKnown<T extends object>(values: unknown, template: T): Partial<T> {
@@ -38,7 +38,7 @@ interface UseProfilesOptions {
   settings: Settings;
   devSettings: DevSettings;
   onApply: (profile: Profile) => void;
-  showToast: (msg: string, type?: "error" | "info") => void;
+  showToast: ShowToast;
 }
 
 export function useProfiles({ settings, devSettings, onApply, showToast }: UseProfilesOptions) {
@@ -55,9 +55,9 @@ export function useProfiles({ settings, devSettings, onApply, showToast }: UsePr
     if (!path) return;
     try {
       await invoke("save_file", { path, data: toBase64(JSON.stringify(currentProfile(), null, 2)) });
-      showToast("Profile exported", "info");
+      showToast("Profile exported", "success");
     } catch (e) {
-      showToast(`Export failed: ${e}`);
+      showToast("Could not export the profile", "error", { detail: `${e}` });
     }
   }, [currentProfile, showToast]);
 
@@ -71,9 +71,9 @@ export function useProfiles({ settings, devSettings, onApply, showToast }: UsePr
     try {
       const text = await invoke<string>("read_text_file", { path });
       onApply(sanitizeProfile(JSON.parse(text)));
-      showToast("Profile applied", "info");
+      showToast("Profile applied", "success");
     } catch (e) {
-      showToast(`Import failed: ${e}`);
+      showToast("Could not import the profile", "error", { detail: `${e}` });
     }
   }, [onApply, showToast]);
 
@@ -81,9 +81,9 @@ export function useProfiles({ settings, devSettings, onApply, showToast }: UsePr
     const link = `another://apply?profile=${toBase64Url(JSON.stringify(currentProfile()))}`;
     try {
       await navigator.clipboard.writeText(link);
-      showToast("Profile link copied", "info");
+      showToast("Profile link copied", "success");
     } catch (e) {
-      showToast(`Copy failed: ${e}`);
+      showToast("Could not copy the link", "error", { detail: `${e}` });
     }
   }, [currentProfile, showToast]);
 

@@ -2,10 +2,16 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import type { Device, Settings, FrameEvent, Screen, MacroEvent, PerfStats, EncoderTuning, DevSettings } from "../types";
+import type { Device, Settings, FrameEvent, Screen, MacroEvent, PerfStats, EncoderTuning, DevSettings, ShowToast } from "../types";
 
-export const CHROME_H = 40;
-export const FRAME_PAD = 8;
+const FRAME_PAD = 8;
+const TITLE_H = 36;
+const RAIL_W = 32;
+export const CHROME_W = FRAME_PAD * 3 + RAIL_W;
+export const CHROME_H = FRAME_PAD * 3 + TITLE_H;
+export const MAIN_WINDOW = { width: 1120, height: 760 };
+const MAIN_MIN = new LogicalSize(720, 520);
+const MIRROR_MIN = new LogicalSize(280 + CHROME_W, 240 + CHROME_H);
 const MAX_VIEW = 860;
 const PERF_INTERVAL_MS = 1000;
 const VIDEO_KIND_CONFIG = 0;
@@ -55,7 +61,7 @@ function windowSizeFor(width: number, height: number) {
   const aspect = width / height;
   const viewW = aspect > 1 ? MAX_VIEW : Math.round(MAX_VIEW * aspect);
   const viewH = aspect > 1 ? Math.round(MAX_VIEW / aspect) : MAX_VIEW;
-  return new LogicalSize(Math.max(viewW, 280) + FRAME_PAD * 2, viewH + CHROME_H + FRAME_PAD);
+  return new LogicalSize(Math.max(viewW, 280) + CHROME_W, viewH + CHROME_H);
 }
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -69,7 +75,7 @@ function b64ToBytes(b64: string): Uint8Array {
 
 interface UseConnectionOptions {
   settings: Settings;
-  showToast: (msg: string, type?: "error" | "info") => void;
+  showToast: ShowToast;
   takeScreenshot: () => void;
   setShowSettings: (fn: (s: boolean) => boolean) => void;
   setThemePref: (fn: (p: "light" | "dark" | "auto") => "light" | "dark" | "auto") => void;
@@ -113,6 +119,10 @@ export function useConnection(opts: UseConnectionOptions) {
   const pendingPackets = useRef<EncodedVideoChunk[]>([]);
   const awaitingKeyFrame = useRef(true);
   const [streamReady, setStreamReady] = useState(false);
+  const [streamConfigured, setStreamConfigured] = useState(false);
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [dropped, setDropped] = useState<{ device: Device; reason: string } | null>(null);
+  const mainSize = useRef<LogicalSize | null>(null);
   const streamReadyRef = useRef(false);
   const perfCounters = useRef<PerfCounters>(emptyCounters());
   const decodeStarts = useRef(new Map<number, number>());
@@ -196,6 +206,21 @@ export function useConnection(opts: UseConnectionOptions) {
     }
   }, []);
 
+  const restoreMainSize = async () => {
+    const size = mainSize.current ?? new LogicalSize(MAIN_WINDOW.width, MAIN_WINDOW.height);
+    mainSize.current = null;
+    setNativeActive(false);
+    try {
+      isProgrammaticResize.current = true;
+      const win = getCurrentWindow();
+      await win.setMinSize(MAIN_MIN);
+      await win.setSize(new LogicalSize(Math.max(size.width, MAIN_MIN.width), Math.max(size.height, MAIN_MIN.height)));
+    } catch {
+    } finally {
+      isProgrammaticResize.current = false;
+    }
+  };
+
   const connectToDevice = useCallback(async (device: Device, s: Settings, silent = false, dev?: DevSettings) => {
     if (dev) {
       directAdbRef.current = dev.directAdb;
@@ -213,6 +238,18 @@ export function useConnection(opts: UseConnectionOptions) {
       setStreamReady(false);
     }
     setConnectingSerial(device.serial);
+    setDropped(null);
+    if (!silent && !mainSize.current) {
+      try {
+        const win = getCurrentWindow();
+        mainSize.current = (await win.innerSize()).toLogical(await win.scaleFactor());
+        await win.setMinSize(MIRROR_MIN);
+      } catch { }
+    }
+    if (!keepLastFrame) {
+      setStreamConfigured(false);
+      setLatencyMs(null);
+    }
     cleanupDecoder();
     closeVideoSocket();
     const lowLatency = lowLatencyRef.current && !videoSocketFailed.current;
@@ -244,6 +281,7 @@ export function useConnection(opts: UseConnectionOptions) {
 
       const handleConfig = (codec: string, descBytes: Uint8Array) => {
         cleanupDecoder();
+        setStreamConfigured(true);
         codecRef.current = codec;
         const config: VideoDecoderConfig = {
           codec,
@@ -378,6 +416,7 @@ export function useConnection(opts: UseConnectionOptions) {
           markStreamReady();
         } else if (msg.event === "native_stats") {
           opts.onNativeStats?.(msg.data.fps, msg.data.lag_min_ms);
+          if (msg.data.screen_ms > 0) setLatencyMs(msg.data.screen_ms);
           if (!perfOverlayRef.current) return;
           const canvas = canvasRef.current;
           invoke("log_perf", { stats: { renderer: "native", ...msg.data } }).catch(() => { });
@@ -404,7 +443,8 @@ export function useConnection(opts: UseConnectionOptions) {
           if (!isReconnecting.current) {
             setConnectedDevice(null);
             setScreen("welcome");
-            showToast("Device disconnected", "info");
+            setDropped({ device, reason: msg.data.reason });
+            restoreMainSize();
           }
         }
       };
@@ -465,11 +505,11 @@ export function useConnection(opts: UseConnectionOptions) {
       await getCurrentWindow().setSize(windowSizeFor(width, height));
       isProgrammaticResize.current = false;
     } catch (e) {
-      if (!silent) showToast(`Failed to connect: ${e}`);
+      if (!silent) showToast(`Could not mirror ${device.model.replace(/_/g, " ")}`, "error", { detail: `${e}` });
       else if (gen === connectionGen.current) {
         streamReadyRef.current = false;
         setStreamReady(false);
-        showToast(`Reconnect failed: ${e}`);
+        showToast("Could not reconnect", "error", { detail: `${e}` });
       }
     } finally {
       if (gen === connectionGen.current) {
@@ -488,9 +528,7 @@ export function useConnection(opts: UseConnectionOptions) {
     try { await invoke("disconnect_device"); } catch { }
     setConnectedDevice(null);
     setScreen("welcome");
-    try {
-      await getCurrentWindow().setSize(new LogicalSize(380, 750));
-    } catch { }
+    await restoreMainSize();
   }, [cleanupDecoder, closeVideoSocket]);
 
   const scheduleReconnect = useCallback((s: Settings) => {
@@ -547,12 +585,11 @@ export function useConnection(opts: UseConnectionOptions) {
       recordedChunks.current = [];
       recorderRef.current = null;
       setRecording(false);
-      showToast("Recording saved", "info");
+      showToast("Recording saved", "success");
     };
     recorder.start(100);
     recorderRef.current = recorder;
     setRecording(true);
-    showToast("Recording started", "info");
   }, [showToast]);
 
   const pressButton = useCallback(async (button: string) => {
@@ -631,8 +668,8 @@ export function useConnection(opts: UseConnectionOptions) {
             const factor = await win.scaleFactor();
             const inner = await win.innerSize();
             const logical = inner.toLogical(factor);
-            const cw = logical.width - FRAME_PAD * 2;
-            const ch = logical.height - CHROME_H - FRAME_PAD;
+            const cw = logical.width - CHROME_W;
+            const ch = logical.height - CHROME_H;
             if (ch < 200 || cw < 240) return;
             const { width: dw, height: dh } = displaySizeRef.current;
             const targetAspect = dw / dh;
@@ -650,7 +687,7 @@ export function useConnection(opts: UseConnectionOptions) {
             newW = Math.min(Math.max(newW, 280), cw);
             newH = Math.min(Math.max(newH, 240), ch);
             isProgrammaticResize.current = true;
-            await win.setSize(new LogicalSize(newW + FRAME_PAD * 2, newH + CHROME_H + FRAME_PAD));
+            await win.setSize(new LogicalSize(newW + CHROME_W, newH + CHROME_H));
             isProgrammaticResize.current = false;
           } catch {
             isProgrammaticResize.current = false;
@@ -686,10 +723,8 @@ export function useConnection(opts: UseConnectionOptions) {
   }, [opts.takeScreenshot, pressButton, disconnect, opts.setThemePref, opts.setShowSettings]);
 
   useEffect(() => {
-    if (!opts.perfOverlay) {
-      setPerfStats(null);
-      return;
-    }
+    if (!opts.perfOverlay) setPerfStats(null);
+    if (screen !== "another") return;
     perfCounters.current = emptyCounters();
     let last = performance.now();
     const timer = setInterval(() => {
@@ -716,11 +751,13 @@ export function useConnection(opts: UseConnectionOptions) {
         height: canvasRef.current?.height ?? 0,
         codec: codecRef.current,
       };
+      if (stats.screenMs > 0) setLatencyMs(stats.screenMs);
+      if (!perfOverlayRef.current) return;
       setPerfStats(stats);
       if (c.packets > 0) invoke("log_perf", { stats }).catch(() => { });
     }, PERF_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [opts.perfOverlay]);
+  }, [opts.perfOverlay, screen]);
 
   return {
     screen,
@@ -728,6 +765,10 @@ export function useConnection(opts: UseConnectionOptions) {
     connectingSerial,
     deviceSize,
     streamReady,
+    streamConfigured,
+    latencyMs,
+    dropped,
+    clearDropped: () => setDropped(null),
     perfStats,
     nativeActive,
     canvasRef,

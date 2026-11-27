@@ -1,27 +1,23 @@
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Device } from "../types";
+import type { Device, ShowToast } from "../types";
 
-export function useDevices(showToast: (msg: string, type?: "error" | "info") => void) {
+const VISIBLE_STATES = ["device", "unauthorized"];
+
+export function useDevices(showToast: ShowToast) {
   const [devices, setDevices] = useState<Device[]>([]);
+  const [loaded, setLoaded] = useState(false);
 
   const refreshDevices = useCallback(async () => {
     try {
       const devs = await invoke<Device[]>("list_devices");
-      const connected = devs.filter((d) => d.state === "device");
-      const wifiModels = new Set(
-        connected.filter((d) => d.serial.includes(":")).map((d) => d.model)
-      );
-      const usbModels = new Set(
-        connected.filter((d) => !d.serial.includes(":")).map((d) => d.model)
-      );
-      setDevices(
-        connected
-          .filter((d) => !(usbModels.has(d.model) && d.serial.includes(":")))
-          .map((d) => ({ ...d, wifi_available: wifiModels.has(d.model) }))
-      );
+      const visible = devs.filter((d) => VISIBLE_STATES.includes(d.state));
+      const wifiModels = new Set(visible.filter((d) => d.serial.includes(":")).map((d) => d.model));
+      setDevices(visible.map((d) => ({ ...d, wifi_available: wifiModels.has(d.model) })));
     } catch (e) {
-      showToast(`${e}`);
+      showToast("Could not list phones", "error", { detail: `${e}` });
+    } finally {
+      setLoaded(true);
     }
   }, [showToast]);
 
@@ -31,5 +27,5 @@ export function useDevices(showToast: (msg: string, type?: "error" | "info") => 
     return () => clearInterval(interval);
   }, [refreshDevices]);
 
-  return { devices, refreshDevices };
+  return { devices, loaded, refreshDevices };
 }
