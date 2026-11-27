@@ -3,11 +3,6 @@ mod commands;
 mod state;
 #[cfg(target_os = "macos")]
 mod native_video;
-#[cfg(target_os = "macos")]
-mod window_blur;
-#[cfg(not(target_os = "macos"))]
-#[path = "window_blur_stub.rs"]
-mod window_blur;
 #[cfg(not(target_os = "macos"))]
 #[path = "native_video_stub.rs"]
 mod native_video;
@@ -209,7 +204,6 @@ pub fn run() {
             commands::delete_file,
             commands::cli_status,
             commands::install_cli,
-            commands::set_window_blur,
             commands::device_info,
             commands::device_facts,
         ])

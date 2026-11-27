@@ -118,7 +118,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const isMac = navigator.userAgent.includes("Mac");
 
   return (
-    <AppDialog open={open} onOpenChange={onOpenChange} label="Settings" top={48} className="window--solid flex gap-2" style={{ width: "100%", maxWidth: 960, height: "min(720px, calc(100vh - 96px))", padding: 8 }}>
+    <AppDialog open={open} onOpenChange={onOpenChange} label="Settings" top={48} className="flex gap-2" style={{ width: "100%", maxWidth: 960, height: "min(720px, calc(100vh - 96px))", padding: 8 }}>
       <aside className="settings-aside flex-[0_0_216px] min-w-0 px-3 pb-3 pt-1.5 box-border flex flex-col gap-4" style={{ borderRadius: 24, background: "var(--side-panel)", boxShadow: "inset 0 0 0 1px var(--glass-edge)" }}>
         <div style={{ height: 6 }} />
         <div className="brand">

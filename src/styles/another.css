@@ -3,8 +3,7 @@
 :root{--glass-alpha:.72;--glass-blur:40px;--font-ui:"Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--font-display:"Bricolage Grotesque Variable","Inter Variable",sans-serif;--font-code:ui-monospace,SFMono-Regular,Menlo,monospace}
 
 html,body,#root{height:100%}
-body{margin:0;font:400 14px/20px var(--font-ui);font-optical-sizing:auto;font-feature-settings:"cv11","ss03";color:var(--foreground);-webkit-font-smoothing:antialiased;background:transparent}
-html:not(.vibrancy) body{background:var(--window-fallback)}
+body{margin:0;font:400 14px/20px var(--font-ui);font-optical-sizing:auto;font-feature-settings:"cv11","ss03";color:var(--foreground);-webkit-font-smoothing:antialiased;background:var(--window-fallback)}
 a{color:inherit;text-decoration:none}
 
 .app-window{height:100%;box-sizing:border-box;padding:8px;display:flex;gap:8px;background:linear-gradient(160deg,var(--sheen),transparent 38%),var(--glass)}

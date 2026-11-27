@@ -51,7 +51,6 @@ const LIVE_SIZE_DEBOUNCE_MS = 300;
 const RECONNECT_DEV_KEYS: (keyof DevSettings)[] = ["directAdb", "lowLatency", "encoderTuning", "anotherServer", "nativeVideo", "networkStream"];
 const STAY_ON_ALL_SOURCES = "7";
 const MAX_GLASS_BLUR_PX = 60;
-const BLUR_APPLY_DEBOUNCE_MS = 40;
 const PRESET_LABELS: Record<string, string> = { performance: "Performance", balanced: "Balanced", quality: "Quality" };
 
 function readJson<T>(key: string, fallback: T): T {
@@ -119,7 +118,6 @@ function App() {
   const updater = useUpdater(showToast);
 
   useEffect(() => {
-    document.documentElement.classList.toggle("vibrancy", isMac);
     getVersion().then(setVersion).catch(() => { });
   }, []);
 
@@ -128,14 +126,6 @@ function App() {
     root.style.setProperty("--glass-alpha", String(glass.opacity / 100));
     root.style.setProperty("--glass-blur", `${(glass.blur * MAX_GLASS_BLUR_PX) / 100}px`);
   }, [glass]);
-
-  useEffect(() => {
-    if (!isMac) return;
-    const timer = setTimeout(() => {
-      invoke("set_window_blur", { percent: glass.blur }).catch(() => { });
-    }, BLUR_APPLY_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [glass.blur]);
 
   const setGlass = (next: { opacity: number; blur: number }) => {
     setGlassState(next);

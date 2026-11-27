@@ -22,7 +22,6 @@
         "hiddenTitle": true,
         "acceptFirstMouse": true,
         "label": "main",
-        "transparent": true,
         "trafficLightPosition": {
           "x": 28,
           "y": 28
@@ -31,8 +30,7 @@
     ],
     "security": {
       "csp": null
-    },
-    "macOSPrivateApi": true
+    }
   },
   "plugins": {
     "deep-link": {

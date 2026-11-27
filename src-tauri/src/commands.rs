@@ -1078,8 +1078,3 @@ pub async fn install_cli() -> Result<String, String> {
 pub async fn install_cli() -> Result<String, String> {
     Err(format!("Add the folder that holds {} to your PATH to use it as {}", CLI_NAME, CLI_COMMAND))
 }
-
-#[tauri::command]
-pub async fn set_window_blur(window: tauri::WebviewWindow, percent: u32) -> Result<(), String> {
-    crate::window_blur::set_blur(&window, percent).map_err(|e| e.to_string())
-}
