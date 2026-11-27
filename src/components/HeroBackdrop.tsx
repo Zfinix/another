@@ -57,10 +57,7 @@ function Prism({ rand }: { rand: () => number }) {
   return (
     <g>
       {shards.map((s, i) => (
-        <g key={i}>
-          <polygon points={s.points} fill={`var(--hero-c${s.c})`} style={{ opacity: s.o }} />
-          <polyline points={s.points.split(" ").slice(0, 2).join(" ")} fill="none" stroke="var(--hero-ink)" strokeWidth={0.8} style={{ opacity: 0.6 }} />
-        </g>
+        <polygon key={i} points={s.points} fill={`var(--hero-c${s.c})`} style={{ opacity: s.o }} />
       ))}
     </g>
   );
