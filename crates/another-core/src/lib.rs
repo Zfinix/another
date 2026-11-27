@@ -3,6 +3,7 @@ pub mod adb;
 pub mod control;
 pub mod h264;
 pub mod macro_engine;
+pub mod notifications;
 pub mod profile;
 pub mod scrcpy;
 pub mod tailnet;
