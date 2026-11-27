@@ -117,6 +117,7 @@ fn reset_after_page_load(webview: &Webview) {
     let label = webview.label().to_string();
     if label.starts_with(commands::MIRROR_LABEL_PREFIX) {
         native_video::detach(&label);
+        video::set_record_feed(&label, false);
         let app = webview.app_handle().clone();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
@@ -230,6 +231,7 @@ pub fn run() {
                 }
                 WindowEvent::Destroyed => {
                     native_video::forget(&label);
+                    video::set_record_feed(&label, false);
                     tauri::async_runtime::spawn(async move {
                         let state = app.state::<AppState>();
                         commands::end_session(&state, &label).await;

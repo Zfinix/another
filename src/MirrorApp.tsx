@@ -250,6 +250,15 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
 
   useEffect(() => onStored("stay_awake", (value) => setStayAwake(value === "true")), []);
 
+  const finishRecordingRef = useRef(connection.finishRecording);
+  finishRecordingRef.current = connection.finishRecording;
+  // Every way out (the close button, Disconnect, a dropped phone, another disconnect) asks the
+  // window to close, and the window waits here so a recording in progress is still saved.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().onCloseRequested(() => finishRecordingRef.current());
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
   // The backend puts the phone's setting back when its last mirror session ends.
   useEffect(() => {
     if (!connection.streamReady) return;

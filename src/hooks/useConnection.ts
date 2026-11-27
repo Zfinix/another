@@ -138,6 +138,8 @@ export function useConnection(opts: UseConnectionOptions) {
   const mutedRef = useRef(false);
   mutedRef.current = muted;
   const recorderRef = useRef<MediaRecorder | null>(null);
+  /** Settles once the last recording has been written, so a closing window can wait for it. */
+  const recordingSaved = useRef<Promise<void>>(Promise.resolve());
   const recordCanvas = useRef<HTMLCanvasElement | null>(null);
   const recordDecoder = useRef<VideoDecoder | null>(null);
   const recordAwaitingKey = useRef(true);
@@ -645,7 +647,16 @@ export function useConnection(opts: UseConnectionOptions) {
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunks.push(e.data);
     };
+    let markSaved = () => { };
+    recordingSaved.current = new Promise<void>((resolve) => { markSaved = resolve; });
     recorder.onstop = async () => {
+      try {
+        await saveRecording();
+      } finally {
+        markSaved();
+      }
+    };
+    const saveRecording = async () => {
       const blob = new Blob(chunks, { type: format.mime.split(";")[0] });
       const filename = `recording-${Date.now()}.${format.ext}`;
       const savePath = localStorage.getItem("save_path");
@@ -675,6 +686,12 @@ export function useConnection(opts: UseConnectionOptions) {
     invoke("set_record_feed", { enabled: true }).catch(() => { });
     if (anotherServerRef.current) invoke("request_key_frame").catch(() => { });
   }, [showToast, stopRecording]);
+
+  /** Stops a recording in progress and resolves once its file is saved. */
+  const finishRecording = useCallback(async () => {
+    if (recorderRef.current) stopRecording();
+    await recordingSaved.current;
+  }, [stopRecording]);
 
   const pressButton = useCallback(async (button: string) => {
     opts.onRecordEvent?.({ type: "button", button });
@@ -863,6 +880,7 @@ export function useConnection(opts: UseConnectionOptions) {
     recording,
     setMuted,
     toggleRecording,
+    finishRecording,
     connectToDevice,
     disconnect,
     scheduleReconnect,
