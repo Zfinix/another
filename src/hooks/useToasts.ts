@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import type { Toast, ToastOptions, ToastType } from "../types";
+import { cleanError } from "../lib/errors";
 
 let toastId = 0;
 const TOAST_MS = 4000;
@@ -14,7 +15,8 @@ export function useToasts() {
 
   const showToast = useCallback((message: string, type: ToastType = "error", options: ToastOptions = {}) => {
     const id = ++toastId;
-    setToasts((prev) => [...prev, { id, message, type, ...options }]);
+    const detail = type === "error" && options.detail ? cleanError(options.detail) : options.detail;
+    setToasts((prev) => [...prev, { id, message, type, ...options, detail }]);
     setTimeout(() => dismissToast(id), options.action ? TOAST_WITH_ACTION_MS : TOAST_MS);
   }, [dismissToast]);
 
