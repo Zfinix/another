@@ -151,7 +151,12 @@ jobs:
           if ! command -v zsyncmake >/dev/null; then
             sudo apt-get install -y zsync
           fi
-          APPIMAGE=$(find . -type f -name '*.AppImage' | head -1)
+          APPIMAGE=$(ls src-tauri/target/release/bundle/appimage/*.AppImage 2>/dev/null | head -1)
+          if [ -z "$APPIMAGE" ]; then
+            mkdir -p /tmp/appimage
+            gh release download "$TAG" --pattern '*.AppImage' --dir /tmp/appimage --clobber
+            APPIMAGE=$(ls /tmp/appimage/*.AppImage 2>/dev/null | head -1)
+          fi
           if [ -z "$APPIMAGE" ]; then
             echo "::error::No AppImage found to generate a .zsync for."
             exit 1
@@ -169,6 +174,7 @@ jobs:
       inputs.platforms == 'all' ||
       contains(inputs.platforms, 'macos')
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: macos-latest
