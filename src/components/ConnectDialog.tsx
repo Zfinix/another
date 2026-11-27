@@ -1,20 +1,52 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AppDialog, DialogTitle } from "@/components/ui/dialog";
 import { Icon } from "@/components/Icon";
+import { InputOTP } from "@/components/ui/input-otp";
+import { cleanError } from "@/lib/errors";
 import type { ShowToast, TailnetPeer } from "../types";
 
-type Tab = "address" | "pair" | "tailnet";
+type Tab = "qr" | "address" | "pair" | "tailnet";
 
 const TABS: { id: Tab; name: string; action: string }[] = [
+  { id: "qr", name: "QR code", action: "New code" },
+  { id: "pair", name: "Code", action: "Pair and connect" },
   { id: "address", name: "Address", action: "Connect" },
-  { id: "pair", name: "Pair with code", action: "Pair and connect" },
   { id: "tailnet", name: "Tailnet", action: "Connect" },
 ];
 
 const RECENTS_KEY = "recent_addresses";
 const MAX_RECENTS = 5;
 const CODE_LENGTH = 6;
+/** What Wireless debugging shows above the pairing code: an IPv4 or bracketed IPv6 address with its port. */
+const PAIR_ADDRESS = /^(\d{1,3}(\.\d{1,3}){3}|\[[\da-f:]+\]):\d{2,5}$/i;
+const QR_SIZE = 192;
+const QR_QUIET_ZONE = 4;
+
+interface QrPairing {
+  name: string;
+  password: string;
+  size: number;
+  modules: boolean[];
+}
+
+interface QrPaired {
+  serial: string;
+  host: string;
+}
+
+function QrCode({ size, modules }: { size: number; modules: boolean[] }) {
+  const path = useMemo(
+    () => modules.reduce((d, dark, i) => (dark ? `${d}M${i % size} ${Math.floor(i / size)}h1v1h-1z` : d), ""),
+    [size, modules],
+  );
+  const span = size + QR_QUIET_ZONE * 2;
+  return (
+    <svg viewBox={`${-QR_QUIET_ZONE} ${-QR_QUIET_ZONE} ${span} ${span}`} width={QR_SIZE} height={QR_SIZE} shapeRendering="crispEdges" role="img" aria-label="Pairing QR code">
+      <path d={path} fill="#18181b" />
+    </svg>
+  );
+}
 
 export interface RecentAddress {
   name: string;
@@ -55,19 +87,51 @@ interface ConnectDialogProps {
 }
 
 export function ConnectDialog({ open, onOpenChange, peers, wifiPort, onConnected, showToast }: ConnectDialogProps) {
-  const [tab, setTab] = useState<Tab>("address");
+  const [tab, setTab] = useState<Tab>("qr");
   const [address, setAddress] = useState("");
   const [pairAddress, setPairAddress] = useState("");
   const [code, setCode] = useState("");
   const [peer, setPeer] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [recents, setRecents] = useState<RecentAddress[]>([]);
+  const [qr, setQr] = useState<QrPairing | null>(null);
+  const [qrError, setQrError] = useState<string | null>(null);
+  const [qrAttempt, setQrAttempt] = useState(0);
+  const callbacks = useRef({ onConnected, onOpenChange, showToast });
+  callbacks.current = { onConnected, onOpenChange, showToast };
 
   useEffect(() => {
     if (!open) return;
     setRecents(readRecents());
     setBusy(false);
   }, [open]);
+
+  useEffect(() => {
+    if (!open || tab !== "qr") return;
+    let live = true;
+    setQr(null);
+    setQrError(null);
+    (async () => {
+      try {
+        const pairing = await invoke<QrPairing>("qr_pair_start");
+        if (!live) return;
+        setQr(pairing);
+        const paired = await invoke<QrPaired>("qr_pair_wait", { name: pairing.name, password: pairing.password });
+        if (!live) return;
+        if (/^[\d.]+:\d+$/.test(paired.serial)) rememberAddress(paired.host, paired.serial);
+        const { onConnected, onOpenChange, showToast } = callbacks.current;
+        showToast("Paired with the phone", "success");
+        onConnected(paired.serial, paired.host);
+        onOpenChange(false);
+      } catch (e) {
+        if (live && `${e}` !== "Cancelled") setQrError(cleanError(e));
+      }
+    })();
+    return () => {
+      live = false;
+      invoke("qr_pair_cancel").catch(() => { });
+    };
+  }, [open, tab, qrAttempt]);
 
   const connectTo = async (target: string, name: string) => {
     await invoke("wifi_connect", { address: target });
@@ -76,7 +140,11 @@ export function ConnectDialog({ open, onOpenChange, peers, wifiPort, onConnected
     onOpenChange(false);
   };
 
-  const submit = async () => {
+  const submit = async (pairCode = code) => {
+    if (tab === "qr") {
+      setQrAttempt((n) => n + 1);
+      return;
+    }
     if (busy) return;
     setBusy(true);
     try {
@@ -84,7 +152,7 @@ export function ConnectDialog({ open, onOpenChange, peers, wifiPort, onConnected
         const target = withPort(address, wifiPort);
         await connectTo(target, recents.find((r) => r.address === target)?.name ?? target);
       } else if (tab === "pair") {
-        await invoke("adb_pair", { address: pairAddress.trim(), code });
+        await invoke("adb_pair", { address: pairAddress.trim(), code: pairCode });
         const host = pairAddress.trim().split(":")[0];
         showToast("Paired with the phone", "success", { detail: "Now connecting over Wi-Fi" });
         await connectTo(withPort(host, wifiPort), host);
@@ -102,8 +170,9 @@ export function ConnectDialog({ open, onOpenChange, peers, wifiPort, onConnected
     }
   };
 
+  const pairAddressValid = PAIR_ADDRESS.test(pairAddress.trim());
   const ready =
-    tab === "address" ? !!address.trim() : tab === "pair" ? !!pairAddress.trim() && code.length === CODE_LENGTH : !!peer;
+    tab === "qr" ? !!qr || !!qrError : tab === "address" ? !!address.trim() : tab === "pair" ? pairAddressValid && code.length === CODE_LENGTH : !!peer;
   const action = TABS.find((t) => t.id === tab)!.action;
 
   return (
@@ -121,6 +190,17 @@ export function ConnectDialog({ open, onOpenChange, peers, wifiPort, onConnected
           <button key={t.id} type="button" role="tab" aria-selected={tab === t.id} className={tab === t.id ? "tab on" : "tab"} style={{ flex: 1 }} onClick={() => setTab(t.id)}>{t.name}</button>
         ))}
       </div>
+
+      {tab === "qr" && (
+        <div className="flex flex-col items-center gap-4">
+          <div className="flex items-center justify-center" style={{ width: QR_SIZE, height: QR_SIZE, borderRadius: 20, background: "#fff", boxShadow: "var(--field-shadow)", opacity: qrError ? 0.3 : 1, transition: "opacity .15s ease" }}>
+            {qr ? <QrCode size={qr.size} modules={qr.modules} /> : !qrError && <span className="spinner" />}
+          </div>
+          <span className="meta" style={{ textAlign: "center", padding: "0 12px", color: qrError ? "var(--rec)" : undefined }}>
+            {qrError ?? "On the phone: Developer options, Wireless debugging, Pair device with QR code"}
+          </span>
+        </div>
+      )}
 
       {tab === "address" && (
         <>
@@ -153,26 +233,35 @@ export function ConnectDialog({ open, onOpenChange, peers, wifiPort, onConnected
             <div className="field">
               <input id="pair-address" value={pairAddress} placeholder="192.168.1.24:37099" autoFocus spellCheck={false} style={{ fontVariantNumeric: "tabular-nums" }} onChange={(e) => setPairAddress(e.target.value)} />
             </div>
-          </div>
-          <div className="flex flex-col gap-2">
-            <label className="label" htmlFor="pair-code">Pairing code</label>
-            <div className="relative grid gap-2" style={{ gridTemplateColumns: `repeat(${CODE_LENGTH}, minmax(0, 1fr))` }}>
-              {Array.from({ length: CODE_LENGTH }, (_, i) => (
-                <span key={i} className="flex items-center justify-center" style={{ height: 40, borderRadius: 12, background: "var(--field)", boxShadow: i === code.length ? "inset 0 0 0 2px var(--accent)" : "var(--field-shadow)", fontSize: 16, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{code[i] ?? ""}</span>
-              ))}
-              <input
-                id="pair-code"
-                value={code}
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                aria-label="Pairing code"
-                className="absolute inset-0 opacity-0"
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, CODE_LENGTH))}
-                onKeyDown={(e) => e.key === "Enter" && ready && submit()}
-              />
-            </div>
             <span className="meta" style={{ padding: "0 12px" }}>On the phone: Developer options, Wireless debugging, Pair device with pairing code</span>
           </div>
+          {pairAddressValid && (
+            <div className="rise flex flex-col gap-2">
+              <label className="label" htmlFor="pair-code">Pairing code</label>
+              <InputOTP
+                id="pair-code"
+                maxLength={CODE_LENGTH}
+                value={code}
+                onChange={setCode}
+                onComplete={(value: string) => { if (!busy) submit(value); }}
+                autoFocus
+                autoComplete="one-time-code"
+                aria-label="Pairing code"
+              >
+                <InputOTP.Group>
+                  <InputOTP.Slot index={0} />
+                  <InputOTP.Slot index={1} />
+                  <InputOTP.Slot index={2} />
+                </InputOTP.Group>
+                <InputOTP.Separator />
+                <InputOTP.Group>
+                  <InputOTP.Slot index={3} />
+                  <InputOTP.Slot index={4} />
+                  <InputOTP.Slot index={5} />
+                </InputOTP.Group>
+              </InputOTP>
+            </div>
+          )}
         </>
       )}
 
@@ -197,7 +286,7 @@ export function ConnectDialog({ open, onOpenChange, peers, wifiPort, onConnected
 
       <footer className="flex justify-end gap-2">
         <button type="button" className="button button--secondary" onClick={() => onOpenChange(false)}>Cancel</button>
-        <button type="button" className="button button--primary" disabled={!ready || busy} onClick={submit}>
+        <button type="button" className="button button--primary" disabled={!ready || busy} onClick={() => submit()}>
           {busy ? <span className="spinner" style={{ borderColor: "rgba(255,255,255,.3)", borderTopColor: "#fff" }} /> : action}
         </button>
       </footer>
