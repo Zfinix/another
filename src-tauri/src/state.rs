@@ -19,6 +19,8 @@ pub struct ScrcpySession {
     pub muted: bool,
     pub live_video_control: bool,
     pub port: PortLease,
+    /// The window's page load this session was started from; see `AppState::page_loaded`.
+    pub page: u64,
 }
 
 /// A local port for one session's server tunnel, handed back when the session is dropped.
@@ -49,6 +51,7 @@ pub struct AppState {
     /// Phones whose `stay_on_while_plugged_in` setting Another changed, with the value to put back.
     pub stay_on: Arc<Mutex<HashMap<String, String>>>,
     ports: Arc<std::sync::Mutex<HashSet<u16>>>,
+    pages: Arc<std::sync::Mutex<HashMap<String, u64>>>,
 }
 
 impl AppState {
@@ -62,7 +65,22 @@ impl AppState {
             })),
             stay_on: Arc::new(Mutex::new(HashMap::new())),
             ports: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            pages: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Counts a new page load in a window, so sessions started before it can be told apart.
+    pub fn page_loaded(&self, label: &str) -> u64 {
+        let Ok(mut pages) = self.pages.lock() else {
+            return 0;
+        };
+        let page = pages.entry(label.to_string()).or_insert(0);
+        *page += 1;
+        *page
+    }
+
+    pub fn page(&self, label: &str) -> u64 {
+        self.pages.lock().ok().and_then(|pages| pages.get(label).copied()).unwrap_or(0)
     }
 
     pub fn lease_port(&self) -> Option<PortLease> {

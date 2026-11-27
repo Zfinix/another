@@ -25,21 +25,37 @@ pub async fn list_devices() -> Result<Vec<adb::Device>, String> {
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 const VIEWER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Stops the session shown in a window, if there is one.
-pub async fn end_session(state: &AppState, label: &str) {
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions.remove(label);
-    let still_shown = session
-        .as_ref()
-        .is_some_and(|ended| sessions.values().any(|s| s.device_serial == ended.device_serial));
-    drop(sessions);
+/// Ends the session a window shows when `ends` agrees: stops its server and puts back the phone's
+/// stay-awake setting. Each window shows one phone, so no other session needs that setting.
+async fn finish_session(
+    sessions: &Mutex<HashMap<String, ScrcpySession>>,
+    stay_on: &Mutex<HashMap<String, String>>,
+    label: &str,
+    ends: impl FnOnce(&ScrcpySession) -> bool,
+) {
+    let session = {
+        let mut sessions = sessions.lock().await;
+        match sessions.get(label) {
+            Some(current) if ends(current) => sessions.remove(label),
+            _ => None,
+        }
+    };
     if let Some(session) = session {
         session.shutdown.notify_one();
         scrcpy::stop_server(&session.device_serial, session.port.port).await;
-        if !still_shown {
-            restore_stay_on(&state.stay_on, &session.device_serial).await;
-        }
+        restore_stay_on(stay_on, &session.device_serial).await;
     }
+}
+
+/// Stops the session shown in a window, if there is one.
+pub async fn end_session(state: &AppState, label: &str) {
+    finish_session(&state.sessions, &state.stay_on, label, |_| true).await;
+}
+
+/// Stops a window's session only if it was started before page load `page`, so the session the
+/// reloaded page starts is left alone.
+pub async fn end_session_before_page(state: &AppState, label: &str, page: u64) {
+    finish_session(&state.sessions, &state.stay_on, label, |session| session.page < page).await;
 }
 
 #[tauri::command]
@@ -112,6 +128,9 @@ pub async fn connect_device(
         None
     };
 
+    // Asked before taking any lock: on macOS it waits for the main thread, which quitting blocks on these locks.
+    let focused = window.is_focused().unwrap_or(false);
+    let page = state.page(&label);
     let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let session = ScrcpySession {
         id: session_id,
@@ -124,6 +143,7 @@ pub async fn connect_device(
         muted: false,
         live_video_control: settings.another_server,
         port: lease,
+        page,
     };
 
     let width = streams.screen_width;
@@ -136,7 +156,7 @@ pub async fn connect_device(
         }
         let mut focus = state.audio_focus.lock().await;
         let focus_is_stale = focus.as_ref().is_none_or(|current| !sessions.contains_key(current));
-        if focus_is_stale || window.is_focused().unwrap_or(false) {
+        if focus_is_stale || focused {
             *focus = Some(label.clone());
         }
         apply_audio_focus(&sessions, focus.as_deref());
@@ -145,7 +165,6 @@ pub async fn connect_device(
     let sessions_arc = state.sessions.clone();
     let stay_on_arc = state.stay_on.clone();
     let video_label = label.clone();
-    let serial_clone = serial.clone();
 
     let video_codec = if settings.video_codec == "h265" {
         video::VideoCodec::H265
@@ -170,17 +189,7 @@ pub async fn connect_device(
             }
         }
         let _ = server_process.kill().await;
-        let mut sessions = sessions_arc.lock().await;
-        if sessions.get(&label).is_some_and(|current| current.id == session_id) {
-            let ended = sessions.remove(&label);
-            let still_shown = sessions.values().any(|s| s.device_serial == serial_clone);
-            drop(sessions);
-            scrcpy::stop_server(&serial_clone, port).await;
-            drop(ended);
-            if !still_shown {
-                restore_stay_on(&stay_on_arc, &serial_clone).await;
-            }
-        }
+        finish_session(&sessions_arc, &stay_on_arc, &label, |current| current.id == session_id).await;
     });
 
     Ok((width, height, ws_url, native_active))

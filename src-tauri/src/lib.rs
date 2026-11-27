@@ -119,9 +119,10 @@ fn reset_after_page_load(webview: &Webview) {
         native_video::detach(&label);
         video::set_record_feed(&label, false);
         let app = webview.app_handle().clone();
+        let page = app.state::<AppState>().page_loaded(&label);
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
-            commands::end_session(&state, &label).await;
+            commands::end_session_before_page(&state, &label, page).await;
         });
         return;
     }
