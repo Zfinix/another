@@ -147,6 +147,40 @@ pub async fn push_file(serial: &str, local: &str, remote: &str) -> Result<()> {
     Ok(())
 }
 
+pub const DOWNLOADS_DIR: &str = "/sdcard/Download/";
+
+pub async fn install_apk(serial: &str, path: &str) -> Result<()> {
+    run_adb(&["-s", serial, "install", "-r", "-t", path]).await.map_err(|e| {
+        let msg = e.to_string();
+        match msg.find("Failure [") {
+            Some(at) => anyhow!("{}", msg[at..].trim_end()),
+            None => e,
+        }
+    })?;
+    Ok(())
+}
+
+/// Pushes every path in one adb call, then asks the media scanner to index them so they show up in Files and Photos.
+pub async fn push_to_downloads(serial: &str, paths: &[String]) -> Result<()> {
+    let mut args = vec!["-s", serial, "push"];
+    args.extend(paths.iter().map(String::as_str));
+    args.push(DOWNLOADS_DIR);
+    run_adb(&args).await?;
+
+    let scans: Vec<String> = paths
+        .iter()
+        .filter_map(|p| std::path::Path::new(p).file_name()?.to_str())
+        .map(|name| {
+            let uri = format!("file://{DOWNLOADS_DIR}{name}").replace('\'', "'\\''");
+            format!("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d '{uri}' >/dev/null")
+        })
+        .collect();
+    if !scans.is_empty() {
+        let _ = run_adb(&["-s", serial, "shell", &scans.join("; ")]).await;
+    }
+    Ok(())
+}
+
 pub async fn forward_port(serial: &str, local_port: u16, remote: &str) -> Result<()> {
     run_adb(&[
         "-s",
@@ -306,6 +340,42 @@ pub async fn mdns_services() -> Result<Vec<MdnsService>> {
 pub async fn notifications(serial: &str) -> Result<Vec<crate::notifications::PhoneNotification>> {
     let output = run_adb_text(&["-s", serial, "shell", "dumpsys", "notification", "--noredact"]).await?;
     Ok(crate::notifications::parse_dumpsys(&output))
+}
+
+const ICON_SERVER_REMOTE_PATH: &str = "/data/local/tmp/another-icons.jar";
+const ICON_SERVER_MAIN: &str = "dev.another.server.AppIcons";
+
+fn is_package_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+}
+
+/// Reads each app's launcher icon from the phone through the Another server, as base64 PNG keyed by package.
+pub async fn app_icons(serial: &str, packages: &[String]) -> Result<HashMap<String, String>> {
+    let packages: Vec<&str> = packages.iter().map(String::as_str).filter(|p| is_package_name(p)).collect();
+    if packages.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let server = RESOURCE_DIR
+        .get()
+        .map(|dir| dir.join("resources").join(crate::scrcpy::ANOTHER_SERVER_FILE))
+        .filter(|path| path.exists())
+        .ok_or_else(|| anyhow!("The Another server is missing from this build"))?;
+    push_file(serial, &server.to_string_lossy(), ICON_SERVER_REMOTE_PATH).await?;
+    let command = format!(
+        "CLASSPATH={ICON_SERVER_REMOTE_PATH} app_process / {ICON_SERVER_MAIN} {}",
+        packages.join(" ")
+    );
+    let output = run_adb_text(&["-s", serial, "shell", &command]).await?;
+    Ok(parse_app_icons(&output))
+}
+
+fn parse_app_icons(output: &str) -> HashMap<String, String> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().split_once(' '))
+        .filter(|(pkg, png)| is_package_name(pkg) && !png.is_empty() && !png.contains(' '))
+        .map(|(pkg, png)| (pkg.to_string(), png.to_string()))
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -601,6 +671,15 @@ mod tests {
         assert_eq!(facts.storage_free_kb, Some(55060176));
         assert_eq!(facts.memory_kb, Some(7841284));
         assert_eq!((facts.screen_width, facts.screen_height), (Some(1080), Some(2400)));
+    }
+
+    #[test]
+    fn parses_app_icons_and_skips_log_lines() {
+        let output = "[server] INFO: Device: [Google] google sdk_gphone64\ncom.google.android.gm iVBORw0KGgo=\n\ncom.ubercab iVBORw0KGgoAAAA\nnot a package! abc\n";
+        let icons = super::parse_app_icons(output);
+        assert_eq!(icons.len(), 2);
+        assert_eq!(icons["com.google.android.gm"], "iVBORw0KGgo=");
+        assert_eq!(icons["com.ubercab"], "iVBORw0KGgoAAAA");
     }
 
     #[test]

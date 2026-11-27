@@ -7,7 +7,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { downloadDir } from "@tauri-apps/api/path";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { Settings, Device, DevSettings, Profile, RemoteCommand, View, TailnetPeer } from "./types";
-import { PRESETS, DEFAULT_DEV_SETTINGS, setDeviceNickname } from "./types";
+import { PRESETS, bestSettings, DEFAULT_DEV_SETTINGS, setDeviceNickname } from "./types";
 import { isNetworkSerial } from "@/lib/utils";
 import { describeFacts, deviceKind, deviceMaker, deviceName, getDeviceInfo, hasDeviceInfo, peerMaker, prettyModel, resolutionLabel, setDeviceInfo, KIND_ICON, KIND_PATH, type DeviceInfo } from "@/lib/devices";
 import { useTheme } from "./hooks/useTheme";
@@ -28,7 +28,7 @@ import { EmptyState, TrustState, DisconnectedState } from "./components/StateVie
 import { MacrosView } from "./components/MacrosView";
 import { RecordingsView, type RecordingFile } from "./components/RecordingsView";
 import { AgentsView } from "./components/AgentsView";
-import { NotificationsView, NotificationBanners } from "./components/NotificationsView";
+import { NotificationsView } from "./components/NotificationsView";
 import { SettingsDialog, type SettingsPane, type NetworkPrefs } from "./components/SettingsDialog";
 import { ConnectDialog, rememberAddress } from "./components/ConnectDialog";
 import { CommandBar, type CommandDef } from "./components/CommandBar";
@@ -57,7 +57,7 @@ interface KeyedCommand extends CommandDef {
   shift?: boolean;
 }
 
-const PRESET_LABELS: Record<string, string> = { performance: "Performance", balanced: "Balanced", quality: "Quality" };
+const PRESET_LABELS: Record<string, string> = { best: "Best for this phone", performance: "Performance", balanced: "Balanced", quality: "Quality" };
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -97,7 +97,7 @@ function App() {
   const [showCommandBar, setShowCommandBar] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   const [settings, setSettings] = useState<Settings>(() => readJson("stream_settings", PRESETS.balanced));
-  const [activePreset, setActivePreset] = useState(() => localStorage.getItem("active_preset") || "balanced");
+  const [activePreset, setActivePreset] = useState(() => localStorage.getItem("active_preset") ?? "best");
   const [devSettings, setDevSettings] = useState<DevSettings>(() => readJson("dev_settings", DEFAULT_DEV_SETTINGS));
   const [networkPrefs, setNetworkPrefsState] = useState<NetworkPrefs>(() => readJson("network_prefs", { autoReconnect: true, showTailnet: true }));
   const [stayAwake, setStayAwakeState] = useState(() => localStorage.getItem("stay_awake") === "true");
@@ -241,8 +241,13 @@ function App() {
 
   const profiles = useProfiles({ settings, devSettings, onApply: applyProfile, showToast });
 
+  const presetSettings = (name: string, serial?: string) => {
+    const base = name === "best" ? bestSettings(!!serial && isNetworkSerial(serial)) : PRESETS[name];
+    return { ...base, audio: settings.audio, adaptive_network: settings.adaptive_network };
+  };
+
   const applyPreset = (name: string) => {
-    const next = { ...PRESETS[name], audio: settings.audio };
+    const next = presetSettings(name, activeSerial ?? undefined);
     setSettings(next);
     setActivePreset(name);
     store("stream_settings", JSON.stringify(next));
@@ -384,10 +389,6 @@ function App() {
   const copyCode = (code: string) => {
     navigator.clipboard.writeText(code);
     showToast("Code copied", "success");
-  };
-
-  const openOnPhone = (pkg: string) => {
-    if (onlineDevice) invoke("open_phone_app", { serial: onlineDevice.serial, package: pkg }).catch((e) => showToast("Could not open the app", "error", { detail: `${e}` }));
   };
 
   const mirror = useCallback((device: Device) => {
@@ -561,8 +562,11 @@ function App() {
   const pathLabelRef = useRef(pathLabel);
   pathLabelRef.current = pathLabel;
 
-  const streamSummary = (network: boolean) =>
-    [resolutionLabel(settings.max_size), `${settings.max_fps} fps`, settings.adaptive || (network && settings.adaptive_network !== false) ? "Adaptive" : null].filter(Boolean).join(" · ");
+  const streamSummary = (network: boolean, refreshHz?: number | null) => {
+    const shown = activePreset === "best" ? bestSettings(network) : settings;
+    const fps = activePreset === "best" ? (refreshHz ? `${refreshHz} fps` : "Full frame rate") : `${shown.max_fps} fps`;
+    return [resolutionLabel(shown.max_size), fps, shown.adaptive || (network && settings.adaptive_network !== false) ? "Adaptive" : null].filter(Boolean).join(" · ");
+  };
 
   const profileOptions = [
     ...(activePreset ? [] : [{ value: "custom", label: "Your settings" }]),
@@ -596,6 +600,7 @@ function App() {
         <NotificationsView
           deviceName={deviceName(onlineDevice)}
           items={notifications.items}
+          icons={notifications.icons}
           systemCenter={notifications.systemCenter}
           onSystemCenter={notifications.setSystemCenter}
           offerCodes={notifications.offerCodes}
@@ -644,7 +649,7 @@ function App() {
           facts={deviceFacts ? describeFacts(deviceFacts) : undefined}
           connection={{ icon: KIND_ICON[kind], value: pathLabel(selectedDevice), healthy: true }}
           latency={latency ? `${latency} ms` : "Not measured"}
-          stream={streamSummary(kind === "wifi")}
+          stream={streamSummary(kind === "wifi", deviceFacts?.refresh_hz)}
           profile={profileControl}
           audio={{ checked: settings.audio, onChange: (on) => updateSetting("audio", on) }}
           awake={{ checked: stayAwake, onChange: setStayAwake }}
@@ -747,7 +752,6 @@ function App() {
         showToast={showToast}
       />
       <CommandBar open={showCommandBar} onOpenChange={setShowCommandBar} commands={commands} />
-      <NotificationBanners banners={notifications.banners} onDismiss={notifications.dismissBanner} onCopyCode={copyCode} onOpen={openOnPhone} />
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </>
   );

@@ -939,6 +939,28 @@ pub async fn phone_notifications(
 }
 
 #[tauri::command]
+pub async fn app_icons(serial: String, packages: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
+    adb::app_icons(&serial, &packages).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn notify_phone(
+    app: AppHandle,
+    title: String,
+    subtitle: String,
+    body: String,
+    package: String,
+    icon: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::phone_notify::show(&app, &title, &subtitle, &body, &package, icon.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn open_phone_app(serial: String, package: String) -> Result<(), String> {
     adb::launch_app(&serial, &package).await.map_err(|e| e.to_string())
 }
@@ -991,6 +1013,62 @@ pub async fn delete_file(path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn device_info(serial: String) -> Result<adb::DeviceInfo, String> {
     adb::device_info(&serial).await.map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct FailedFile {
+    pub name: String,
+    pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct SentFiles {
+    pub installed: Vec<String>,
+    pub pushed: Vec<String>,
+    pub failed: Vec<FailedFile>,
+}
+
+fn display_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn send_files(serial: String, paths: Vec<String>) -> Result<SentFiles, String> {
+    let (apks, files): (Vec<String>, Vec<String>) = paths
+        .into_iter()
+        .partition(|p| p.to_ascii_lowercase().ends_with(".apk") && std::path::Path::new(p).is_file());
+
+    let installs = async {
+        let mut installed = Vec::new();
+        let mut failed = Vec::new();
+        for apk in &apks {
+            match adb::install_apk(&serial, apk).await {
+                Ok(()) => installed.push(display_name(apk)),
+                Err(e) => failed.push(FailedFile { name: display_name(apk), error: e.to_string() }),
+            }
+        }
+        (installed, failed)
+    };
+    let push = async {
+        if files.is_empty() {
+            return Ok(());
+        }
+        adb::push_to_downloads(&serial, &files).await
+    };
+    let ((installed, mut failed), pushed) = tokio::join!(installs, push);
+
+    let names: Vec<String> = files.iter().map(|f| display_name(f)).collect();
+    let pushed = match pushed {
+        Ok(()) => names,
+        Err(e) => {
+            let error = e.to_string();
+            failed.extend(names.into_iter().map(|name| FailedFile { name, error: error.clone() }));
+            Vec::new()
+        }
+    };
+    Ok(SentFiles { installed, pushed, failed })
 }
 
 #[tauri::command]
@@ -1088,11 +1166,6 @@ pub async fn install_cli() -> Result<String, String> {
 #[tauri::command]
 pub async fn install_cli() -> Result<String, String> {
     Err(format!("Add the folder that holds {} to your PATH to use it as {}", CLI_NAME, CLI_COMMAND))
-}
-
-#[tauri::command]
-pub async fn set_window_blur(window: tauri::WebviewWindow, percent: u32) -> Result<(), String> {
-    crate::window_blur::set_blur(&window, percent).map_err(|e| e.to_string())
 }
 
 pub const MIRROR_LABEL_PREFIX: &str = "mirror-";

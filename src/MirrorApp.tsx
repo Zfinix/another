@@ -6,7 +6,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { downloadDir } from "@tauri-apps/api/path";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { Settings, Device, QuickActionId, DevSettings } from "./types";
-import { PRESETS, DEFAULT_PINNED_ACTIONS, DEFAULT_DEV_SETTINGS, QUICK_ACTION_ORDER } from "./types";
+import { PRESETS, bestSettings, DEFAULT_PINNED_ACTIONS, DEFAULT_DEV_SETTINGS, QUICK_ACTION_ORDER } from "./types";
 import { isNetworkSerial } from "@/lib/utils";
 import { cleanError } from "@/lib/errors";
 import { announce, onStored, readStoredJson, store } from "@/lib/sync";
@@ -31,6 +31,7 @@ import { useAdaptiveBitrate } from "./hooks/useAdaptiveBitrate";
 import { useMacro } from "./hooks/useMacro";
 import { useLatencyProbe } from "./hooks/useLatencyProbe";
 import { useWindowDrag } from "./hooks/useWindowDrag";
+import { useFileDrop } from "./hooks/useFileDrop";
 import { MirrorScreen } from "./components/MirrorScreen";
 import { FailedState, type StartStep } from "./components/StateViews";
 import { CommandBar, type CommandDef } from "./components/CommandBar";
@@ -62,6 +63,13 @@ function readPins(): QuickActionId[] {
   }
 }
 
+/** The saved stream settings, or this phone's own best settings when the Best preset is on. */
+function readSettings(serial: string): Settings {
+  const stored = readStoredJson("stream_settings", PRESETS.balanced);
+  if ((localStorage.getItem("active_preset") ?? "best") !== "best") return stored;
+  return { ...bestSettings(isNetworkSerial(serial)), audio: stored.audio, adaptive_network: stored.adaptive_network };
+}
+
 /** A saved window size wins, reshaped to the phone's aspect so the video fills it. */
 function sizeFromBounds(serial: string, width: number, height: number): LogicalSize {
   const saved = readMirrorBounds(serial);
@@ -84,7 +92,7 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
   const { serial } = identity;
   const label = mirrorLabel(serial);
   const device: Device = useMemo(() => ({ serial, model: identity.model, state: "device" }), [serial, identity.model]);
-  const [settings, setSettings] = useState<Settings>(() => readStoredJson("stream_settings", PRESETS.balanced));
+  const [settings, setSettings] = useState<Settings>(() => readSettings(serial));
   const [devSettings, setDevSettings] = useState<DevSettings>(() => readStoredJson("dev_settings", DEFAULT_DEV_SETTINGS));
   const [pins, setPins] = useState<QuickActionId[]>(readPins);
   const [stayAwake, setStayAwake] = useState(() => localStorage.getItem("stay_awake") === "true");
@@ -172,6 +180,7 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
   scheduleReconnectRef.current = scheduleReconnect;
   connectedRef.current = !!connectedDevice;
 
+  const fileDrop = useFileDrop(connection.screen === "another" ? serial : null, showToast);
   const latencyProbe = useLatencyProbe({ canvasRef: connection.canvasRef, frameDrawnRef: connection.frameDrawnRef, native: connection.nativeActive });
 
   const liveSizeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -221,7 +230,7 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
 
   useEffect(() => onStored("stream_settings", () => {
     const prev = settingsRef.current;
-    const next = readStoredJson("stream_settings", PRESETS.balanced);
+    const next = readSettings(serial);
     setSettings(next);
     if (!next.adaptive) adaptiveRef.current.disableAdaptive();
     if (!connectedRef.current) return;
@@ -421,6 +430,7 @@ export default function MirrorApp({ identity }: { identity: MirrorIdentity }) {
           recording={connection.recording}
           muted={connection.muted}
           macroRecording={macro.macroRecording}
+          fileDrop={fileDrop}
           pins={pins}
           onTogglePin={togglePin}
           macros={macro.macros.map((m) => m.name)}

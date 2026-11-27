@@ -19,7 +19,7 @@ export function AppDialog({ open, onOpenChange, children, className, style, labe
         <div className="fixed inset-x-0 bottom-0 z-50 flex items-start justify-center px-6 pb-6 pointer-events-none" style={{ top }}>
           <DialogPrimitive.Popup
             aria-label={label}
-            className={cn("window rise pointer-events-auto outline-none max-h-full", className)}
+            className={cn("window window--solid rise pointer-events-auto outline-none max-h-full", className)}
             style={style}
           >
             {children}

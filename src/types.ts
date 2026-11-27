@@ -93,8 +93,8 @@ export const DEFAULT_DEV_SETTINGS: DevSettings = {
   directAdb: false,
   lowLatency: true,
   encoderTuning: "default",
-  anotherServer: false,
-  nativeVideo: false,
+  anotherServer: true,
+  nativeVideo: typeof navigator !== "undefined" && navigator.userAgent.includes("Mac"),
   networkStream: true,
 };
 
@@ -175,10 +175,18 @@ export function getDeviceDisplayName(device: Device): string {
 export type ThemePreference = "light" | "dark" | "auto";
 
 export const PRESETS: Record<string, Settings> = {
+  best: { max_size: 0, max_fps: 120, video_bit_rate: 32000000, video_codec: "h264", audio: false, adaptive: false },
   performance: { max_size: 720, max_fps: 30, video_bit_rate: 2000000, video_codec: "h264", audio: false, adaptive: false },
   balanced: { max_size: 1024, max_fps: 60, video_bit_rate: 8000000, video_codec: "h264", audio: false, adaptive: false },
   quality: { max_size: 1920, max_fps: 60, video_bit_rate: 24000000, video_codec: "h264", audio: false, adaptive: false },
 };
+
+const BEST_OVER_NETWORK: Partial<Settings> = { max_size: 1920, video_bit_rate: 16000000 };
+
+/** The best stream for a phone: native size at its full refresh rate over USB, and a size Wi-Fi can carry otherwise. */
+export function bestSettings(network: boolean): Settings {
+  return network ? { ...PRESETS.best, ...BEST_OVER_NETWORK } : PRESETS.best;
+}
 
 export const RESOLUTION_OPTIONS = [
   { value: 480, label: "480p" },

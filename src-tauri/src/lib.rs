@@ -3,14 +3,14 @@ mod commands;
 mod state;
 #[cfg(target_os = "macos")]
 mod native_video;
-#[cfg(target_os = "macos")]
-mod window_blur;
-#[cfg(not(target_os = "macos"))]
-#[path = "window_blur_stub.rs"]
-mod window_blur;
 #[cfg(not(target_os = "macos"))]
 #[path = "native_video_stub.rs"]
 mod native_video;
+#[cfg(target_os = "macos")]
+mod phone_notify;
+#[cfg(not(target_os = "macos"))]
+#[path = "phone_notify_stub.rs"]
+mod phone_notify;
 mod remote;
 mod stream_ws;
 mod video;
@@ -236,17 +236,19 @@ pub fn run() {
             commands::qr_pair_wait,
             commands::qr_pair_cancel,
             commands::phone_notifications,
+            commands::app_icons,
+            commands::notify_phone,
             commands::open_phone_app,
             commands::set_stay_on,
             commands::list_files,
             commands::delete_file,
             commands::cli_status,
             commands::install_cli,
-            commands::set_window_blur,
             commands::device_info,
             commands::device_facts,
             commands::open_mirror,
             commands::close_mirror,
+            commands::send_files,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
