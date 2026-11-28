@@ -8,6 +8,7 @@
   <a href="https://github.com/Zfinix/another/releases/latest"><img src="https://img.shields.io/github/v/release/Zfinix/another?style=flat-square" alt="Latest Release" /></a>
   <a href="https://github.com/Zfinix/another/releases"><img src="https://img.shields.io/github/downloads/Zfinix/another/total?style=flat-square" alt="Downloads" /></a>
   <a href="https://github.com/Zfinix/another/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Zfinix/another?style=flat-square" alt="License" /></a>
+  <a href="https://glama.ai/mcp/servers/Zfinix/another"><img src="https://glama.ai/mcp/servers/Zfinix/another/badges/score.svg" alt="Another MCP server on Glama" /></a>
 </p>
 
 A desktop app for mirroring and controlling Android devices. Built with Tauri, React, and Rust.
