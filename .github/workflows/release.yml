@@ -163,7 +163,7 @@ jobs:
           fi
           echo "AppImage: $APPIMAGE"
           if [ ! -f "$APPIMAGE.zsync" ]; then
-            zsyncmake "$APPIMAGE" -u "$(basename "$APPIMAGE")"
+            zsyncmake "$APPIMAGE" -u "$(basename "$APPIMAGE")" -o "$APPIMAGE.zsync"
           fi
           gh release upload "$TAG" "$APPIMAGE.zsync" --clobber
 
