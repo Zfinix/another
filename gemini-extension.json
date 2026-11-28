@@ -1,0 +1,10 @@
+{
+  "name": "another",
+  "version": "1.0.0",
+  "mcpServers": {
+    "another": {
+      "httpUrl": "http://localhost:7070/mcp"
+    }
+  },
+  "contextFileName": "GEMINI.md"
+}
