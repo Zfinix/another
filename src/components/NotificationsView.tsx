@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { Icon } from "@/components/Icon";
 import { Switch } from "@/components/ui/switch";
-import { appName, oneTimeCode, timeAgo, type Banner, type PhoneNotification } from "../hooks/useNotifications";
-import logo from "../assets/logo.png";
+import { appName, oneTimeCode, timeAgo, type PhoneNotification } from "../hooks/useNotifications";
 
 const TONES = ["g-red", "g-green", "g-ink", "g-teal", "g-blue", "g-violet", "g-orange", "g-pink"];
 const MESSAGING = /messaging|whatsapp|telegram|signal|slack|messenger|discord|instagram|twitter|teams/i;
@@ -30,6 +29,7 @@ function tone(pkg: string) {
 interface NotificationsViewProps {
   deviceName: string;
   items: PhoneNotification[];
+  icons: Record<string, string>;
   systemCenter: boolean;
   onSystemCenter: (on: boolean) => void;
   offerCodes: boolean;
@@ -37,7 +37,7 @@ interface NotificationsViewProps {
   onCopyCode: (code: string) => void;
 }
 
-export function NotificationsView({ deviceName, items, systemCenter, onSystemCenter, offerCodes, onOfferCodes, onCopyCode }: NotificationsViewProps) {
+export function NotificationsView({ deviceName, items, icons, systemCenter, onSystemCenter, offerCodes, onOfferCodes, onCopyCode }: NotificationsViewProps) {
   const [tab, setTab] = useState<Tab>("All");
   const shown = items.filter((n) => tab === "All" || (tab === "Codes" ? !!oneTimeCode(n) : MESSAGING.test(n.package)));
 
@@ -64,7 +64,11 @@ export function NotificationsView({ deviceName, items, systemCenter, onSystemCen
             const name = appName(n.package);
             return (
               <div key={n.key} className="tile">
-                <span className={`gi gi--md ${tone(n.package)}`}>{name.charAt(0)}</span>
+                {icons[n.package] ? (
+                  <span className="gi gi--md app-icon"><img src={icons[n.package]} alt="" draggable={false} /></span>
+                ) : (
+                  <span className={`gi gi--md ${tone(n.package)}`}>{name.charAt(0)}</span>
+                )}
                 <div className="flex-1 min-w-0 flex flex-col gap-0.5">
                   <div className="meta flex gap-2"><span>{name}</span><span className="ml-auto">{n.posted_ms ? timeAgo(n.posted_ms) : ""}</span></div>
                   <div className="font-medium truncate">{n.title}</div>
@@ -89,37 +93,6 @@ export function NotificationsView({ deviceName, items, systemCenter, onSystemCen
           <div className="row"><span>Offer Copy code for one-time codes</span><Switch checked={offerCodes} onCheckedChange={onOfferCodes} label="Offer Copy code for one-time codes" /></div>
         </div>
       </section>
-    </div>
-  );
-}
-
-interface BannersProps {
-  banners: Banner[];
-  onDismiss: (key: string) => void;
-  onCopyCode: (code: string) => void;
-  onOpen: (pkg: string) => void;
-}
-
-export function NotificationBanners({ banners, onDismiss, onCopyCode, onOpen }: BannersProps) {
-  return (
-    <div className="fixed top-3 right-3 z-90 flex flex-col gap-2 w-[352px] max-w-[calc(100vw-24px)] pointer-events-none" aria-live="polite">
-      {banners.map((b) => (
-        <div key={b.key} className="glass rise pointer-events-auto flex gap-3 items-start" style={{ padding: "12px 16px", borderRadius: 24 }}>
-          <img src={logo} alt="Another" draggable={false} style={{ width: 40, height: 40, margin: -2, flexShrink: 0 }} />
-          <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-            <div className="meta flex gap-2"><span className="truncate">{appName(b.package)} · {b.device}</span><span className="ml-auto shrink-0">{timeAgo(b.posted_ms)}</span></div>
-            <div className="font-medium truncate">{b.title}</div>
-            {(b.code || b.text) && <div style={{ color: "var(--muted)" }}>{b.code ?? b.text}</div>}
-            <div className="mt-2 flex gap-1">
-              {b.code ? (
-                <button type="button" className="button button--secondary" onClick={() => { onCopyCode(b.code!); onDismiss(b.key); }}>Copy code</button>
-              ) : (
-                <button type="button" className="button button--secondary" onClick={() => { onOpen(b.package); onDismiss(b.key); }}>Open on phone</button>
-              )}
-            </div>
-          </div>
-        </div>
-      ))}
     </div>
   );
 }

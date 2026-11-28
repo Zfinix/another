@@ -19,6 +19,8 @@ export interface DeviceInfo {
   model: string;
   market_name: string;
   android_version: string;
+  /** The phone's own serial number, the same over USB and Wi-Fi. */
+  hardware_serial?: string;
   avd_name: string;
   avd_device: string;
   avd_manufacturer: string;
@@ -95,4 +97,56 @@ export const KIND_ICON: Record<DeviceKind | "tailnet", IconName> = {
 
 export function resolutionLabel(maxSize: number): string {
   return maxSize === 0 ? "Native" : `${maxSize}p`;
+}
+
+export interface DeviceFacts {
+  battery_percent: number | null;
+  charging: boolean;
+  battery_full: boolean;
+  storage_total_kb: number | null;
+  storage_free_kb: number | null;
+  memory_kb: number | null;
+  screen_width: number | null;
+  screen_height: number | null;
+  refresh_hz: number | null;
+}
+
+export interface DeviceFact {
+  label: string;
+  value: string;
+  icon: IconName;
+  tone: string;
+}
+
+/** Memory is sold in these sizes; the kernel reports a little less, so it rounds up to the next one. */
+const MEMORY_SIZES_GB = [1, 1.5, 2, 3, 4, 6, 8, 10, 12, 16, 18, 20, 24, 32, 48, 64];
+
+function gigabytes(kb: number): string {
+  const gb = (kb * 1024) / 1e9;
+  return `${gb < 10 ? gb.toFixed(1).replace(/\.0$/, "") : Math.round(gb)} GB`;
+}
+
+function memorySize(kb: number): string {
+  const gib = kb / 1024 / 1024;
+  const size = MEMORY_SIZES_GB.find((s) => gib <= s) ?? Math.ceil(gib);
+  return `${size} GB`;
+}
+
+export function describeFacts(facts: DeviceFacts): DeviceFact[] {
+  const rows: DeviceFact[] = [];
+  if (facts.battery_percent !== null) {
+    const state = facts.battery_full ? " · Full" : facts.charging ? " · Charging" : "";
+    rows.push({ label: "Battery", value: `${facts.battery_percent}%${state}`, icon: facts.charging ? "batteryCharge" : "battery", tone: "g-green" });
+  }
+  if (facts.storage_free_kb !== null && facts.storage_total_kb !== null) {
+    rows.push({ label: "Storage", value: `${gigabytes(facts.storage_free_kb)} free of ${gigabytes(facts.storage_total_kb)}`, icon: "storage", tone: "g-orange" });
+  }
+  if (facts.memory_kb !== null) {
+    rows.push({ label: "Memory", value: memorySize(facts.memory_kb), icon: "memory", tone: "g-violet" });
+  }
+  if (facts.screen_width !== null && facts.screen_height !== null) {
+    const rate = facts.refresh_hz ? ` · ${facts.refresh_hz} Hz` : "";
+    rows.push({ label: "Display", value: `${facts.screen_width} × ${facts.screen_height}${rate}`, icon: "phoneOn", tone: "g-blue" });
+  }
+  return rows;
 }

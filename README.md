@@ -22,6 +22,12 @@ Grab the latest release for your platform:
 
 **[Download Latest Release](https://github.com/Zfinix/another/releases/latest)**
 
+Or install the app and the `another` command from the Terminal (macOS and Linux):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Zfinix/another/main/install.sh | sh
+```
+
 | Platform | Download |
 |----------|----------|
 | macOS (Apple Silicon) | [.dmg](https://github.com/Zfinix/another/releases/latest) |
@@ -45,6 +51,20 @@ Grab the latest release for your platform:
 - Automatic device detection via ADB
 - Light/dark/auto theme
 - MCP Server for AI agent control
+
+## Command line
+
+Another ships the `another` command. Click Install on the AI and CLI page, or use the install script above, and it talks to the running app.
+
+```sh
+another status                      # what is connected and streaming
+another devices                     # phones Another can see
+another connect <serial>            # start mirroring a phone
+another set max_size=1920 max_fps=60 # change stream settings live
+another measure                     # time touch to screen latency
+another bench a.json b.json         # compare profiles
+another profile export -o mine.json # save the current setup
+```
 
 ## MCP Server
 

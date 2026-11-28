@@ -26,7 +26,7 @@ export function EmptyState({ onConnectByAddress }: { onConnectByAddress: () => v
         <div className="row"><span>Turn on USB debugging</span><span className="value">2</span></div>
         <div className="row"><span>Tap Allow on the phone</span><span className="value">3</span></div>
       </div>
-      <button type="button" className="button button--primary self-start" onClick={onConnectByAddress}>Connect by address</button>
+      <button type="button" className="button button--primary self-start" onClick={onConnectByAddress}>Pair over Wi-Fi</button>
     </Panel>
   );
 }
@@ -93,6 +93,19 @@ export function DisconnectedState({ name, brand, reason, onBack, onReconnect }: 
       <div className="flex gap-2">
         <button type="button" className="button button--secondary" onClick={onBack}>Back to devices</button>
         <button type="button" className="button button--primary" onClick={onReconnect}>Reconnect</button>
+      </div>
+    </Panel>
+  );
+}
+
+export function FailedState({ name, brand, reason, onClose, onRetry }: { name: string; brand: string; reason: string; onClose: () => void; onRetry: () => void }) {
+  return (
+    <Panel>
+      <DeviceTile maker={brand} size="lg" off />
+      <Heading title={`Could not mirror ${name}`} meta={reason} />
+      <div className="flex gap-2">
+        <button type="button" className="button button--secondary" onClick={onClose}>Close</button>
+        <button type="button" className="button button--primary" onClick={onRetry}>Try again</button>
       </div>
     </Panel>
   );

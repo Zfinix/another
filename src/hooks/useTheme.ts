@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { ThemePreference } from "../types";
+import { onStored, store } from "@/lib/sync";
 
 const THEME_FADE_MS = 360;
 
@@ -47,8 +48,12 @@ export function useTheme() {
   }, [themePref]);
 
   useEffect(() => {
-    localStorage.setItem("theme", themePref);
+    if (localStorage.getItem("theme") !== themePref) store("theme", themePref);
   }, [themePref]);
+
+  useEffect(() => onStored("theme", (value) => {
+    if (value === "light" || value === "dark" || value === "auto") setThemePref(value);
+  }), []);
 
   useEffect(() => {
     if (themePref !== "auto") return;

@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "identifier": "com.chizi.another",
   "build": {
-    "beforeDevCommand": "bash scripts/build-cli.sh debug && bun run dev",
+    "beforeDevCommand": "bun scripts/build-cli.ts debug && bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bash scripts/build-cli.sh release && bun run build",
+    "beforeBuildCommand": "bun scripts/build-cli.ts release && bun run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -22,7 +22,6 @@
         "hiddenTitle": true,
         "acceptFirstMouse": true,
         "label": "main",
-        "transparent": true,
         "trafficLightPosition": {
           "x": 28,
           "y": 28
@@ -31,8 +30,7 @@
     ],
     "security": {
       "csp": null
-    },
-    "macOSPrivateApi": true
+    }
   },
   "plugins": {
     "deep-link": {

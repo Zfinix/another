@@ -4,6 +4,7 @@ import { PhonePreview } from "@/components/PhonePreview";
 import { CellSelect, type SelectOption } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { IconName } from "@/lib/icons";
+import type { DeviceFact } from "@/lib/devices";
 
 export interface DeviceViewProps {
   title: string;
@@ -12,6 +13,7 @@ export interface DeviceViewProps {
   status: string;
   detail: string;
   preview: string | null;
+  facts?: DeviceFact[];
   connection: { icon: IconName; value: string; healthy: boolean };
   latency: string;
   stream: string;
@@ -20,7 +22,9 @@ export interface DeviceViewProps {
   awake: { checked: boolean; onChange: (on: boolean) => void };
   secondary: { label: string; run: () => void; busy?: boolean } | null;
   onMirror: () => void;
-  mirrorBusy: boolean;
+  mirrorBusy?: boolean;
+  /** Replaces "Mirror" on the button, such as "Show window" while the phone is mirroring. */
+  mirrorLabel?: string;
 }
 
 function IconCell({ icon, tone, label, children }: { icon: IconName; tone: string; label: string; children: React.ReactNode }) {
@@ -36,7 +40,7 @@ function IconCell({ icon, tone, label, children }: { icon: IconName; tone: strin
 }
 
 export function DeviceView(props: DeviceViewProps) {
-  const { title, brand, online, status, detail, preview, connection, latency, stream, profile, audio, awake, secondary, onMirror, mirrorBusy } = props;
+  const { title, brand, online, status, detail, preview, facts, connection, latency, stream, profile, audio, awake, secondary, onMirror, mirrorBusy, mirrorLabel } = props;
   const statusColor = online ? "var(--live)" : "var(--muted)";
 
   return (
@@ -54,9 +58,21 @@ export function DeviceView(props: DeviceViewProps) {
       </header>
 
       <div className="flex flex-wrap gap-8 items-start">
-        <PhonePreview image={preview} dimmed={!online} secondary={secondary} onMirror={onMirror} mirrorDisabled={!online} mirrorBusy={mirrorBusy} />
+        <PhonePreview image={preview} dimmed={!online} secondary={secondary} onMirror={onMirror} mirrorDisabled={!online} mirrorBusy={mirrorBusy} mirrorLabel={mirrorLabel} />
 
         <div className="flex-[1_1_280px] max-w-[360px] min-w-0 flex flex-col gap-6">
+          {facts && facts.length > 0 && (
+            <section className="flex flex-col gap-2">
+              <div className="label">Device</div>
+              <div className="list">
+                {facts.map((fact) => (
+                  <IconCell key={fact.label} icon={fact.icon} tone={fact.tone} label={fact.label}>
+                    <span className="value" style={{ fontVariantNumeric: "tabular-nums" }}>{fact.value}</span>
+                  </IconCell>
+                ))}
+              </div>
+            </section>
+          )}
           <section className="flex flex-col gap-2">
             <div className="label">Connection</div>
             <div className="list">

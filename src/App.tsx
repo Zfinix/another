@@ -1,41 +1,54 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { emit, emitTo, listen } from "@tauri-apps/api/event";
+import { getCurrentWindow, Window } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getVersion } from "@tauri-apps/api/app";
 import { downloadDir } from "@tauri-apps/api/path";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { Settings, Device, QuickActionId, DevSettings, Profile, RemoteCommand, View, TailnetPeer } from "./types";
-import { PRESETS, DEFAULT_PINNED_ACTIONS, DEFAULT_DEV_SETTINGS, QUICK_ACTION_ORDER, setDeviceNickname } from "./types";
+import type { Settings, Device, DevSettings, Profile, LinkCommand, RemoteCommand, View, TailnetPeer } from "./types";
+import { PRESETS, bestSettings, DEFAULT_DEV_SETTINGS, setDeviceNickname } from "./types";
 import { isNetworkSerial } from "@/lib/utils";
-import { deviceKind, deviceMaker, deviceName, getDeviceInfo, hasDeviceInfo, peerMaker, prettyModel, resolutionLabel, setDeviceInfo, KIND_ICON, KIND_PATH, type DeviceInfo } from "@/lib/devices";
+import { describeFacts, deviceKind, deviceMaker, deviceName, getDeviceInfo, hasDeviceInfo, peerMaker, prettyModel, resolutionLabel, setDeviceInfo, KIND_ICON, KIND_PATH, type DeviceInfo } from "@/lib/devices";
 import { useTheme } from "./hooks/useTheme";
 import { useToasts } from "./hooks/useToasts";
 import { useDevices } from "./hooks/useDevices";
 import { useTailnet } from "./hooks/useTailnet";
 import { usePreviews } from "./hooks/usePreviews";
 import { useNotifications } from "./hooks/useNotifications";
-import { useConnection } from "./hooks/useConnection";
-import { useAdaptiveBitrate } from "./hooks/useAdaptiveBitrate";
 import { useMacro } from "./hooks/useMacro";
-import { useLatencyProbe } from "./hooks/useLatencyProbe";
-import { useProfiles, sanitizeProfile } from "./hooks/useProfiles";
+import { useDeviceFacts } from "./hooks/useDeviceFacts";
+import { useGlass } from "./hooks/useGlass";
+import { useProfiles, sanitizeProfile, describeProfile } from "./hooks/useProfiles";
 import { useUpdater } from "./hooks/useUpdater";
 import { useWindowDrag } from "./hooks/useWindowDrag";
 import { Sidebar, type DeviceActions } from "./components/Sidebar";
 import { DeviceView } from "./components/DeviceView";
-import { EmptyState, TrustState, StartingState, DisconnectedState, type StartStep } from "./components/StateViews";
+import { EmptyState, TrustState, DisconnectedState } from "./components/StateViews";
 import { MacrosView } from "./components/MacrosView";
 import { RecordingsView, type RecordingFile } from "./components/RecordingsView";
 import { AgentsView } from "./components/AgentsView";
-import { NotificationsView, NotificationBanners } from "./components/NotificationsView";
-import { MirrorScreen } from "./components/MirrorScreen";
+import { NotificationsView } from "./components/NotificationsView";
 import { SettingsDialog, type SettingsPane, type NetworkPrefs } from "./components/SettingsDialog";
 import { ConnectDialog, rememberAddress } from "./components/ConnectDialog";
 import { CommandBar, type CommandDef } from "./components/CommandBar";
 import { ToastContainer } from "./components/ToastContainer";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { WhatsNew } from "./components/WhatsNew";
 import { LATEST_NEWS, dismissNews, isNewsDismissed, type News } from "@/lib/news";
+import { onAnnounced, onStored, parseJson, store } from "@/lib/sync";
+import {
+  mirrorLabel,
+  openMirror,
+  MIRROR_CLOSED_EVENT,
+  MIRROR_COMMAND_EVENT,
+  MIRROR_DROPPED_EVENT,
+  MIRROR_STATE_EVENT,
+  MIRROR_STATE_REQUEST,
+  OPEN_SETTINGS_EVENT,
+  type MirrorCommand,
+  type MirrorState,
+} from "@/lib/mirror";
 
 const isMac = navigator.userAgent.includes("Mac");
 const MOD = isMac ? "⌘" : "Ctrl";
@@ -45,13 +58,7 @@ interface KeyedCommand extends CommandDef {
   shift?: boolean;
 }
 
-const LIVE_KEYS: (keyof Settings)[] = ["video_bit_rate", "max_size", "max_fps"];
-const LIVE_SIZE_DEBOUNCE_MS = 300;
-const RECONNECT_DEV_KEYS: (keyof DevSettings)[] = ["directAdb", "lowLatency", "encoderTuning", "anotherServer", "nativeVideo", "networkStream"];
-const STAY_ON_ALL_SOURCES = "7";
-const MAX_GLASS_BLUR_PX = 60;
-const BLUR_APPLY_DEBOUNCE_MS = 40;
-const PRESET_LABELS: Record<string, string> = { performance: "Performance", balanced: "Balanced", quality: "Quality" };
+const PRESET_LABELS: Record<string, string> = { best: "Best for this phone", performance: "Performance", balanced: "Balanced", quality: "Quality" };
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -91,9 +98,8 @@ function App() {
   const [showCommandBar, setShowCommandBar] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   const [settings, setSettings] = useState<Settings>(() => readJson("stream_settings", PRESETS.balanced));
-  const [activePreset, setActivePreset] = useState(() => localStorage.getItem("active_preset") || "balanced");
+  const [activePreset, setActivePreset] = useState(() => localStorage.getItem("active_preset") ?? "best");
   const [devSettings, setDevSettings] = useState<DevSettings>(() => readJson("dev_settings", DEFAULT_DEV_SETTINGS));
-  const [pins, setPins] = useState<QuickActionId[]>(() => readList<QuickActionId>("toolbar_pins", DEFAULT_PINNED_ACTIONS).filter((id) => QUICK_ACTION_ORDER.includes(id)));
   const [networkPrefs, setNetworkPrefsState] = useState<NetworkPrefs>(() => readJson("network_prefs", { autoReconnect: true, showTailnet: true }));
   const [stayAwake, setStayAwakeState] = useState(() => localStorage.getItem("stay_awake") === "true");
   const [savePath, setSavePathState] = useState(() => localStorage.getItem("save_path") || "");
@@ -106,7 +112,9 @@ function App() {
   const [, setNamesVersion] = useState(0);
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [showNews, setShowNews] = useState(() => !isNewsDismissed(LATEST_NEWS.id));
-  const [glass, setGlassState] = useState(() => readJson("window_glass", { opacity: 72, blur: 40 }));
+  const [mirrors, setMirrors] = useState<Record<string, MirrorState>>({});
+  const [activeSerial, setActiveSerial] = useState<string | null>(null);
+  const [dropped, setDropped] = useState<{ device: Device; reason: string } | null>(null);
 
   useWindowDrag();
   const { themePref, setThemePref, cycleTheme } = useTheme();
@@ -114,32 +122,13 @@ function App() {
   const { devices, loaded: devicesLoaded, refreshDevices } = useDevices(showToast);
   const tailnet = useTailnet();
   const previews = usePreviews();
-  const macro = useMacro({ showToast, onRecordingStopped: () => setView({ kind: "macros" }) });
+  const macro = useMacro({ showToast });
   const updater = useUpdater(showToast);
+  const { glass, setGlass } = useGlass();
 
   useEffect(() => {
-    document.documentElement.classList.toggle("vibrancy", isMac);
     getVersion().then(setVersion).catch(() => { });
   }, []);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    root.style.setProperty("--glass-alpha", String(glass.opacity / 100));
-    root.style.setProperty("--glass-blur", `${(glass.blur * MAX_GLASS_BLUR_PX) / 100}px`);
-  }, [glass]);
-
-  useEffect(() => {
-    if (!isMac) return;
-    const timer = setTimeout(() => {
-      invoke("set_window_blur", { percent: glass.blur }).catch(() => { });
-    }, BLUR_APPLY_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [glass.blur]);
-
-  const setGlass = (next: { opacity: number; blur: number }) => {
-    setGlassState(next);
-    localStorage.setItem("window_glass", JSON.stringify(next));
-  };
 
   useEffect(() => {
     if (savePath) return;
@@ -157,139 +146,79 @@ function App() {
 
   useEffect(() => { refreshRecordings(); }, [refreshRecordings]);
 
+  const refreshRecordingsRef = useRef(refreshRecordings);
+  refreshRecordingsRef.current = refreshRecordings;
+  useEffect(() => onAnnounced("recordings", () => refreshRecordingsRef.current()), []);
+  useEffect(() => onStored("dev_settings", (value) => setDevSettings(parseJson(value, DEFAULT_DEV_SETTINGS))), []);
+
   const toggleAlwaysOnTop = useCallback(async () => {
     const next = !alwaysOnTop;
     setAlwaysOnTop(next);
     await getCurrentWindow().setAlwaysOnTop(next);
   }, [alwaysOnTop]);
 
-  const saveBase64 = useCallback(async (prefix: string, ext: string, base64: string) => {
-    const dir = savePath || (await downloadDir()).replace(/\/$/, "");
-    const path = `${dir}/${prefix}-${Date.now()}.${ext}`;
-    await invoke("save_file", { path, data: base64 });
-    return path;
-  }, [savePath]);
+  const activeMirror = activeSerial ? mirrors[activeSerial] ?? null : null;
 
-  const takeScreenshot = useCallback(async () => {
-    try {
-      const base64 = await invoke<string>("take_screenshot");
-      const path = await saveBase64("screenshot", "png", base64);
-      const folder = path.split("/").slice(-2, -1)[0];
-      showToast(`Screenshot saved to ${folder}`, "success", { action: { label: "Show", run: () => { revealItemInDir(path).catch(() => { }); } } });
-    } catch (e) {
-      showToast("Could not take a screenshot", "error", { detail: `${e}` });
-    }
-  }, [saveBase64, showToast]);
-
-  const adaptiveRef = useRef<{
-    frameReceived: () => void;
-    packetReceived: (ptsUs: number) => void;
-    nativeSample: (fps: number, lagMinMs: number) => void;
-    disableAdaptive: () => void;
-  }>({ frameReceived: () => { }, packetReceived: () => { }, nativeSample: () => { }, disableAdaptive: () => { } });
-
-  const settingsRef = useRef(settings);
-  settingsRef.current = settings;
-  const connectedDeviceRef = useRef<Device | null>(null);
-  const scheduleReconnectRef = useRef<((s: Settings) => void) | null>(null);
-
-  const handleCodecFallback = useCallback((codec: string) => {
-    const next = { ...settingsRef.current, video_codec: codec };
-    setSettings(next);
-    if (connectedDeviceRef.current) scheduleReconnectRef.current?.(next);
+  const focusMirror = useCallback((serial: string) => {
+    Window.getByLabel(mirrorLabel(serial)).then((win) => win?.setFocus()).catch(() => { });
   }, []);
 
-  const connection = useConnection({
-    settings,
-    showToast,
-    takeScreenshot,
-    setShowSettings: (fn) => setShowSettings(fn),
-    setThemePref: (fn) => setThemePref(fn),
-    onToggleAlwaysOnTop: toggleAlwaysOnTop,
-    onFrameReceived: () => adaptiveRef.current.frameReceived(),
-    onPacketReceived: (ptsUs) => adaptiveRef.current.packetReceived(ptsUs),
-    onNativeStats: (fps, lagMinMs) => adaptiveRef.current.nativeSample(fps, lagMinMs),
-    onCodecFallback: handleCodecFallback,
-    onRecordEvent: macro.recordEvent,
-    perfOverlay: devSettings.perfOverlay,
-    directAdb: devSettings.directAdb,
-    lowLatency: devSettings.lowLatency,
-    encoderTuning: devSettings.encoderTuning,
-    anotherServer: devSettings.anotherServer,
-    nativeVideo: devSettings.nativeVideo,
-    networkStream: devSettings.networkStream,
-  });
-  const { screen, connectedDevice, connectingSerial, connectToDevice, disconnect, scheduleReconnect, pressButton, dropped } = connection;
+  const sendToMirror = useCallback((serial: string, command: MirrorCommand) => {
+    emitTo(mirrorLabel(serial), MIRROR_COMMAND_EVENT, command).catch(() => { });
+    focusMirror(serial);
+  }, [focusMirror]);
 
-  const latencyProbe = useLatencyProbe({ canvasRef: connection.canvasRef, frameDrawnRef: connection.frameDrawnRef, native: connection.nativeActive });
-  scheduleReconnectRef.current = scheduleReconnect;
-  connectedDeviceRef.current = connectedDevice;
+  useEffect(() => {
+    const window = getCurrentWebviewWindow();
+    const subscriptions = [
+      window.listen<MirrorState>(MIRROR_STATE_EVENT, ({ payload }) => {
+        setMirrors((prev) => ({ ...prev, [payload.serial]: payload }));
+        setActiveSerial((current) => (payload.focused || !current ? payload.serial : current));
+        if (payload.latencyMs !== null) {
+          const value = Math.round(payload.latencyMs);
+          setLatencies((prev) => {
+            if (prev[payload.serial] === value) return prev;
+            const next = { ...prev, [payload.serial]: value };
+            localStorage.setItem("latencies", JSON.stringify(Object.entries(next)));
+            return next;
+          });
+        }
+      }),
+      window.listen<{ serial: string; model: string; reason: string }>(MIRROR_DROPPED_EVENT, ({ payload }) => {
+        setDropped({ device: { serial: payload.serial, model: payload.model, state: "device" }, reason: payload.reason });
+        setView({ kind: "device", serial: payload.serial });
+      }),
+      window.listen(OPEN_SETTINGS_EVENT, () => setShowSettings(true)),
+      listen<string>(MIRROR_CLOSED_EVENT, ({ payload: label }) => {
+        setMirrors((prev) => Object.fromEntries(Object.entries(prev).filter(([, m]) => m.label !== label)));
+        setActiveSerial((current) => (current && mirrorLabel(current) === label ? null : current));
+      }),
+    ];
+    Promise.all(subscriptions).then(() => emit(MIRROR_STATE_REQUEST)).catch(() => { });
+    return () => { subscriptions.forEach((s) => s.then((fn) => fn())); };
+  }, []);
 
-  const liveSizeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-
-  /** Sends bitrate, size and fps changes to the running Another server. Returns false when a reconnect is needed. */
-  const applyLive = (prev: Settings, next: Settings): boolean => {
-    if (!devSettings.anotherServer) return false;
-    const changed = (Object.keys(next) as (keyof Settings)[]).filter((key) => next[key] !== prev[key]);
-    if (changed.some((key) => !LIVE_KEYS.includes(key) && key !== "adaptive")) return false;
-    const fallback = () => scheduleReconnect(next);
-    if (next.video_bit_rate !== prev.video_bit_rate) {
-      invoke("set_video_bit_rate", { bitRate: next.video_bit_rate }).catch(fallback);
-    }
-    if (next.max_size !== prev.max_size || next.max_fps !== prev.max_fps) {
-      clearTimeout(liveSizeTimer.current);
-      liveSizeTimer.current = setTimeout(() => {
-        invoke("set_video_size", { maxSize: next.max_size, maxFps: next.max_fps }).catch(fallback);
-      }, LIVE_SIZE_DEBOUNCE_MS);
-    }
-    return true;
-  };
-  const applyLiveRef = useRef(applyLive);
-  applyLiveRef.current = applyLive;
-
-  const onNetwork = !!connectedDevice && isNetworkSerial(connectedDevice.serial);
-  const adaptiveEnabled = settings.adaptive || (onNetwork && settings.adaptive_network !== false);
-
-  const adaptive = useAdaptiveBitrate({
-    enabled: adaptiveEnabled,
-    native: connection.nativeActive,
-    decoder: connection.decoderRef,
-    currentSettings: settings,
-    onTierChange: (newSettings) => {
-      setActivePreset("");
-      setSettings(newSettings);
-      if (connectedDevice && !applyLive(settings, newSettings)) scheduleReconnect(newSettings);
-    },
-  });
-  adaptiveRef.current = adaptive;
+  useEffect(() => {
+    if (activeSerial && mirrors[activeSerial]) return;
+    const next = Object.keys(mirrors)[0] ?? null;
+    if (next !== activeSerial) setActiveSerial(next);
+  }, [mirrors, activeSerial]);
 
   const updateSetting = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     const next = { ...settings, [key]: value };
-    if (key === "adaptive_network") {
-      setSettings(next);
-      localStorage.setItem("stream_settings", JSON.stringify(next));
-      return;
-    }
-    if (key !== "audio" && key !== "adaptive") {
+    if (key !== "audio" && key !== "adaptive" && key !== "adaptive_network") {
       next.adaptive = false;
-      adaptive.disableAdaptive();
+      setActivePreset("");
+      store("active_preset", "");
     }
     setSettings(next);
-    localStorage.setItem("stream_settings", JSON.stringify(next));
-    if (key !== "audio" && key !== "adaptive") {
-      setActivePreset("");
-      localStorage.setItem("active_preset", "");
-    }
-    if (!connectedDevice) return;
-    if (LIVE_KEYS.includes(key) && applyLive(settings, next)) return;
-    scheduleReconnect(next);
+    store("stream_settings", JSON.stringify(next));
   };
 
   const updateDevSetting = <K extends keyof DevSettings>(key: K, value: DevSettings[K]) => {
     const next = { ...devSettings, [key]: value };
     setDevSettings(next);
-    localStorage.setItem("dev_settings", JSON.stringify(next));
-    if (RECONNECT_DEV_KEYS.includes(key) && connectedDevice) scheduleReconnect(settings);
+    store("dev_settings", JSON.stringify(next));
   };
 
   const devSettingsRef = useRef(devSettings);
@@ -297,55 +226,103 @@ function App() {
   const devicesRef = useRef(devices);
   devicesRef.current = devices;
 
-  const applyProfile = useCallback((profile: Profile, reconnect = true): { settings: Settings; dev: DevSettings } => {
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  /** Saves the profile; open mirror windows see the change and apply it live or reconnect. */
+  const applyProfile = useCallback((profile: Profile): { settings: Settings; dev: DevSettings } => {
     const clean = sanitizeProfile(profile);
-    const prevSettings = settingsRef.current;
-    const nextSettings = { ...prevSettings, ...clean.stream };
+    const nextSettings = { ...settingsRef.current, ...clean.stream };
     const nextDev = { ...devSettingsRef.current, ...clean.dev };
-    const devChanged = RECONNECT_DEV_KEYS.some((key) => nextDev[key] !== devSettingsRef.current[key]);
     setSettings(nextSettings);
     setDevSettings(nextDev);
     setActivePreset("");
-    localStorage.setItem("stream_settings", JSON.stringify(nextSettings));
-    localStorage.setItem("dev_settings", JSON.stringify(nextDev));
-    localStorage.setItem("active_preset", "");
-    if (!nextSettings.adaptive) adaptiveRef.current.disableAdaptive();
-    if (reconnect && connectedDeviceRef.current && (devChanged || !applyLiveRef.current(prevSettings, nextSettings))) {
-      scheduleReconnectRef.current?.(nextSettings);
-    }
+    store("active_preset", "");
+    store("stream_settings", JSON.stringify(nextSettings));
+    store("dev_settings", JSON.stringify(nextDev));
     return { settings: nextSettings, dev: nextDev };
   }, []);
 
   const profiles = useProfiles({ settings, devSettings, onApply: applyProfile, showToast });
 
-  const applyPreset = (name: string) => {
-    const next = { ...PRESETS[name], audio: settings.audio };
-    setSettings(next);
-    setActivePreset(name);
-    localStorage.setItem("stream_settings", JSON.stringify(next));
-    localStorage.setItem("active_preset", name);
-    adaptive.disableAdaptive();
-    if (connectedDevice) scheduleReconnect(next);
+  const presetSettings = (name: string, serial?: string) => {
+    const base = name === "best" ? bestSettings(!!serial && isNetworkSerial(serial)) : PRESETS[name];
+    return { ...base, audio: settings.audio, adaptive_network: settings.adaptive_network };
   };
 
-  const connectBySerial = (serial: string, s: Settings, dev?: DevSettings) => {
+  const applyPreset = (name: string) => {
+    const next = presetSettings(name, activeSerial ?? undefined);
+    setSettings(next);
+    setActivePreset(name);
+    store("active_preset", name);
+    store("stream_settings", JSON.stringify(next));
+  };
+
+  const mirrorsRef = useRef(mirrors);
+  mirrorsRef.current = mirrors;
+
+  /** Opens a phone's window. A phone on USB and Wi-Fi is one phone, so its other window is shown instead of a second one. */
+  const openMirrorFor = useCallback((device: Device) => {
+    const hardware = getDeviceInfo(device.serial)?.hardware_serial;
+    const twin = hardware
+      ? Object.keys(mirrorsRef.current).find((serial) => serial !== device.serial && getDeviceInfo(serial)?.hardware_serial === hardware)
+      : undefined;
+    if (twin) {
+      focusMirror(twin);
+      showToast(`${deviceName(device)} is already mirroring`, "info", { detail: "Close that window to switch connections" });
+      return;
+    }
+    openMirror({ serial: device.serial, title: deviceName(device), model: device.model, brand: deviceMaker(device), path: pathLabelRef.current(device) })
+      .catch((e) => showToast(`Could not open ${deviceName(device)}`, "error", { detail: `${e}` }));
+  }, [showToast, focusMirror]);
+
+  const connectBySerial = (serial: string) => {
     const device = devicesRef.current.find((d) => d.serial === serial) ?? { serial, model: serial, state: "device" };
-    connectToDevice(device, s, false, dev);
+    openMirrorFor(device);
+  };
+
+  const [linkQueue, setLinkQueue] = useState<LinkCommand[]>([]);
+  const linkCommand = linkQueue[0] ?? null;
+
+  const describeLink = (command: LinkCommand): string => {
+    const serial = command.action === "connect" ? command.serial : command.connect;
+    const device = devicesRef.current.find((d) => d.serial === serial);
+    const changes = command.action === "apply" ? describeProfile(command.profile) : [];
+    const steps = [
+      ...(changes.length ? [`change ${changes.join(", ")}`] : []),
+      ...(serial ? [`connect to ${device ? `${deviceName(device)} (${serial})` : serial}`] : []),
+    ];
+    return `A link wants to ${steps.join(" and ")}. Only allow links you trust.`;
   };
 
   const remoteHandlerRef = useRef<(command: RemoteCommand) => void>(() => { });
   remoteHandlerRef.current = (command) => {
-    if (command.action === "apply") {
-      const next = applyProfile(command.profile, !command.connect);
-      if (command.connect) connectBySerial(command.connect, next.settings, next.dev);
+    if (command.action === "link") {
+      setLinkQueue((queue) => [...queue, command.command]);
+    } else if (command.action === "apply") {
+      applyProfile(command.profile);
+      if (command.connect) connectBySerial(command.connect);
     } else if (command.action === "connect") {
-      connectBySerial(command.serial, settingsRef.current);
+      connectBySerial(command.serial);
     } else if (command.action === "disconnect") {
-      disconnect();
+      const serials = command.serial ? [command.serial] : Object.keys(mirrors);
+      serials.forEach((serial) => invoke("close_mirror", { serial }).catch(() => { }));
     } else if (command.action === "measure") {
-      latencyProbe.run();
+      if (activeSerial) sendToMirror(activeSerial, { action: "measure" });
     }
   };
+
+  const menuHandlerRef = useRef<(id: string) => void>(() => { });
+  menuHandlerRef.current = (id) => {
+    if (id === "toggle_theme") setThemePref((p) => (p === "dark" ? "light" : p === "light" ? "dark" : "light"));
+    else if (id === "settings") setShowSettings((open) => !open);
+    else if (id === "always_on_top") toggleAlwaysOnTop();
+  };
+
+  useEffect(() => {
+    const unlisten = getCurrentWebviewWindow().listen<string>("menu-event", (e) => menuHandlerRef.current(e.payload));
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
 
   const [remoteReady, setRemoteReady] = useState(false);
   useEffect(() => {
@@ -356,17 +333,19 @@ function App() {
 
   useEffect(() => {
     if (!remoteReady) return;
+    const modelOf = (serial: string) => devices.find((d) => d.serial === serial)?.model ?? null;
     invoke("report_ui_state", {
       state: {
-        connected: connectedDevice?.serial ?? null,
-        model: connectedDevice?.model ?? null,
-        streamReady: connection.streamReady,
-        nativeActive: connection.nativeActive,
+        connected: activeMirror?.serial ?? null,
+        model: activeMirror ? modelOf(activeMirror.serial) : null,
+        streamReady: activeMirror?.streamReady ?? false,
+        nativeActive: activeMirror?.nativeActive ?? false,
+        sessions: Object.values(mirrors).map((m) => ({ serial: m.serial, model: modelOf(m.serial), streamReady: m.streamReady, nativeActive: m.nativeActive, active: m.serial === activeSerial })),
         profile: profiles.currentProfile(),
         devices: devices.map((d) => ({ serial: d.serial, model: d.model, state: d.state })),
       },
     }).catch(() => { });
-  }, [remoteReady, connectedDevice, connection.streamReady, connection.nativeActive, devices, profiles]);
+  }, [remoteReady, mirrors, activeMirror, activeSerial, devices, profiles]);
 
   useEffect(() => {
     if (!remoteReady) return;
@@ -384,52 +363,18 @@ function App() {
     updater.checkForUpdates(true);
   }, []);
 
-  const stayOnPrevious = useRef<{ serial: string; value: string } | null>(null);
-
-  const restoreStayOn = useCallback(() => {
-    const previous = stayOnPrevious.current;
-    stayOnPrevious.current = null;
-    if (previous) invoke("set_stay_on", { serial: previous.serial, value: previous.value }).catch(() => { });
-  }, []);
-
-  useEffect(() => {
-    if (screen !== "another" || !connectedDevice || !stayAwake || stayOnPrevious.current) return;
-    const serial = connectedDevice.serial;
-    invoke<string>("set_stay_on", { serial, value: STAY_ON_ALL_SOURCES })
-      .then((value) => { stayOnPrevious.current = { serial, value: value === "null" ? "0" : value }; })
-      .catch(() => { });
-  }, [screen, connectedDevice, stayAwake]);
-
-  useEffect(() => {
-    if (screen === "welcome") restoreStayOn();
-  }, [screen, restoreStayOn]);
-
   const setStayAwake = (on: boolean) => {
     setStayAwakeState(on);
-    localStorage.setItem("stay_awake", String(on));
-    if (!on) restoreStayOn();
+    store("stay_awake", String(on));
   };
 
   useEffect(() => {
-    if (!connectedDevice || connection.latencyMs === null) return;
-    const value = Math.round(connection.latencyMs);
-    setLatencies((prev) => {
-      if (prev[connectedDevice.serial] === value) return prev;
-      const next = { ...prev, [connectedDevice.serial]: value };
-      localStorage.setItem("latencies", JSON.stringify(Object.entries(next)));
-      return next;
-    });
-  }, [connectedDevice, connection.latencyMs]);
-
-  useEffect(() => {
-    if (connectedDevice) setView({ kind: "device", serial: connectedDevice.serial });
-  }, [connectedDevice]);
-
-  useEffect(() => {
-    if (!dropped || !networkPrefs.autoReconnect || connectingSerial) return;
+    if (!dropped || !networkPrefs.autoReconnect || mirrors[dropped.device.serial]) return;
     const back = devices.find((d) => d.serial === dropped.device.serial && d.state === "device");
-    if (back) connectToDevice(back, settings);
-  }, [dropped, devices, networkPrefs.autoReconnect, connectingSerial]);
+    if (!back) return;
+    setDropped(null);
+    openMirrorFor(back);
+  }, [dropped, devices, networkPrefs.autoReconnect, mirrors, openMirrorFor]);
 
   const infoRequested = useRef(new Set<string>());
   useEffect(() => {
@@ -451,6 +396,7 @@ function App() {
 
   const selectedDevice = view?.kind === "device" ? devices.find((d) => d.serial === view.serial) ?? null : null;
   const selectedPeer = view?.kind === "tailnet" ? peers.find((p) => p.address === view.address) ?? null : null;
+  const deviceFacts = useDeviceFacts(selectedDevice?.state === "device" ? selectedDevice.serial : null);
 
   useEffect(() => {
     if (!devicesLoaded) return;
@@ -462,30 +408,28 @@ function App() {
     else setView(null);
   }, [devicesLoaded, devices, sidebarPeers, view, selectedDevice, selectedPeer, dropped]);
 
+  const selectedMirroring = !!selectedDevice && !!mirrors[selectedDevice.serial];
   useEffect(() => {
-    if (!selectedDevice || selectedDevice.state !== "device" || screen !== "welcome") return;
+    if (!selectedDevice || selectedDevice.state !== "device" || selectedMirroring) return;
     const serial = selectedDevice.serial;
     if (!previews.preview(serial)) previews.capture(serial);
-  }, [selectedDevice?.serial, selectedDevice?.state, screen]);
+  }, [selectedDevice?.serial, selectedDevice?.state, selectedMirroring]);
 
-  const onlineDevice = connectedDevice ?? (selectedDevice?.state === "device" ? selectedDevice : devices.find((d) => d.state === "device") ?? null);
-  const notifications = useNotifications({ serial: onlineDevice?.serial ?? null, deviceName: onlineDevice ? deviceName(onlineDevice) : "" });
+  const activeDevice = activeSerial ? devices.find((d) => d.serial === activeSerial) ?? null : null;
+  const onlineDevice = activeDevice ?? (selectedDevice?.state === "device" ? selectedDevice : devices.find((d) => d.state === "device") ?? null);
+  const notifications = useNotifications({ serial: onlineDevice?.serial ?? null, deviceName: onlineDevice ? deviceName(onlineDevice) : "", mirroring: !!onlineDevice && !!mirrors[onlineDevice.serial] });
 
   const copyCode = (code: string) => {
     navigator.clipboard.writeText(code);
     showToast("Code copied", "success");
   };
 
-  const openOnPhone = (pkg: string) => {
-    if (onlineDevice) invoke("open_phone_app", { serial: onlineDevice.serial, package: pkg }).catch((e) => showToast("Could not open the app", "error", { detail: `${e}` }));
-  };
-
   const mirror = useCallback((device: Device) => {
-    if (connectingSerial || device.state !== "device") return;
-    connection.clearDropped();
+    if (device.state !== "device") return;
+    setDropped((current) => (current?.device.serial === device.serial ? null : current));
     setView({ kind: "device", serial: device.serial });
-    connectToDevice(device, settings);
-  }, [connectingSerial, connectToDevice, settings, connection.clearDropped]);
+    openMirrorFor(device);
+  }, [openMirrorFor]);
 
   const toggleWifi = async (device: Device) => {
     setBusySerial(device.serial);
@@ -538,12 +482,12 @@ function App() {
   };
 
   const connectPeer = async (peer: TailnetPeer) => {
-    if (!peer.online || connectingSerial) return;
+    if (!peer.online) return;
     setBusySerial(peer.address);
     try {
       await invoke("wifi_connect", { address: peer.address });
       await refreshDevices();
-      connectToDevice({ serial: peer.address, model: peer.name, state: "device" }, settings);
+      mirror({ serial: peer.address, model: peer.name, state: "device" });
     } catch {
       showToast(`Could not reach ${peer.name} over the tailnet`, "error", { detail: "Connect it by USB once and turn on Wi-Fi debugging" });
     } finally {
@@ -566,18 +510,6 @@ function App() {
     } catch (e) {
       showToast("Could not delete the recording", "error", { detail: `${e}` });
     }
-  };
-
-  const toggleRecording = () => {
-    const wasRecording = connection.recording;
-    connection.toggleRecording();
-    if (wasRecording) setTimeout(refreshRecordings, 1500);
-  };
-
-  const togglePin = (id: QuickActionId) => {
-    const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
-    setPins(next);
-    localStorage.setItem("toolbar_pins", JSON.stringify(next));
   };
 
   const setNetworkPrefs = (prefs: NetworkPrefs) => {
@@ -604,44 +536,36 @@ function App() {
     closeNews();
     if (item.action.kind === "view") setView(item.action.view);
     if (item.action.kind === "settings") openSettings(item.action.pane);
+    if (item.action.kind === "connect") setShowConnect(true);
   };
 
-  const rotate = () => { invoke("rotate_device").catch((e) => showToast("Could not rotate the screen", "error", { detail: `${e}` })); };
   const toggleStats = () => updateDevSetting("perfOverlay", !devSettings.perfOverlay);
   const runMacro = (name: string) => {
-    setView({ kind: "device", serial: connectedDevice?.serial ?? "" });
-    macro.playMacro(name);
+    if (activeSerial) sendToMirror(activeSerial, { action: "run-macro", name });
+  };
+  const recordMacro = () => {
+    if (activeSerial) sendToMirror(activeSerial, { action: "record-macro" });
+    else showToast("Mirror a phone to record a macro", "info");
   };
 
   const commands: KeyedCommand[] = useMemo(() => [
-    { id: "mirror", label: "Mirror the selected phone", icon: "play", keys: [MOD, "↩"], key: "enter", section: "Phone", hidden: !!connectedDevice || !selectedDevice, action: () => { if (selectedDevice) mirror(selectedDevice); } },
-    { id: "rotate", label: "Rotate the screen", icon: "rotate", keys: [MOD, "R"], key: "r", section: "Phone", action: rotate },
-    { id: "home", label: "Home", icon: "home", keys: [MOD, "H"], key: "h", section: "Phone", action: () => pressButton("home") },
-    { id: "back", label: "Back", icon: "back", keys: [MOD, "B"], key: "b", section: "Phone", action: () => pressButton("back") },
-    { id: "recents", label: "Recent apps", icon: "recents", keys: [], section: "Phone", action: () => pressButton("recents") },
-    { id: "power", label: "Power", icon: "power", keys: [MOD, "P"], key: "p", section: "Phone", action: () => pressButton("power") },
-    { id: "vol-up", label: "Volume up", icon: "volumeUp", keys: [MOD, "+"], key: "=", section: "Phone", action: () => pressButton("volume_up") },
-    { id: "vol-down", label: "Volume down", icon: "volumeDown", keys: [MOD, "-"], key: "-", section: "Phone", action: () => pressButton("volume_down") },
-    { id: "mute", label: connection.muted ? "Unmute the phone" : "Mute the phone", icon: "mute", keys: [MOD, "M"], key: "m", section: "Phone", action: () => connection.setMuted(!connection.muted) },
-    { id: "screenshot", label: "Take a screenshot", icon: "shot", keys: ["⇧", MOD, "S"], key: "s", shift: true, section: "Phone", action: takeScreenshot },
-    { id: "record", label: connection.recording ? "Stop recording" : "Start recording", icon: "record", keys: ["⇧", MOD, "R"], key: "r", shift: true, section: "Phone", action: toggleRecording },
+    { id: "mirror", label: selectedMirroring ? "Show the mirror window" : "Mirror the selected phone", icon: "play", keys: [MOD, "↩"], key: "enter", section: "Phone", hidden: !selectedDevice, action: () => { if (selectedDevice) mirror(selectedDevice); } },
     { id: "stats", label: devSettings.perfOverlay ? "Hide stream stats" : "Show stream stats", icon: "stats", keys: [MOD, "I"], key: "i", section: "Phone", action: toggleStats },
-    { id: "disconnect", label: "Disconnect", icon: "unplug", keys: [MOD, "D"], key: "d", section: "Phone", hidden: !connectedDevice, action: disconnect },
     { id: "cmdbar", label: "Command bar", icon: "search", keys: [MOD, "K"], key: "k", section: "App", action: () => setShowCommandBar((s) => !s) },
     { id: "settings", label: "Settings", icon: "settings", keys: [MOD, ","], key: ",", section: "App", action: () => openSettings() },
-    { id: "connect", label: "Connect by address", icon: "add", keys: [], section: "App", action: () => setShowConnect(true) },
+    { id: "connect", label: "Connect a phone", icon: "qr", keywords: ["qr", "code", "pair", "wifi", "address"], keys: [], section: "App", action: () => setShowConnect(true) },
     { id: "whats-new", label: "What's new", icon: "sparkle", keys: [], section: "App", action: () => setShowNews(true) },
     { id: "refresh", label: "Refresh devices", icon: "refresh", keys: [], section: "App", action: () => { refreshDevices(); tailnet.refresh(); } },
     { id: "theme", label: "Change the theme", icon: "sun", keys: [MOD, "T"], key: "t", section: "App", action: cycleTheme },
     { id: "always-on-top", label: alwaysOnTop ? "Stop keeping on top" : "Keep on top of other windows", icon: "pin", keys: ["⇧", MOD, "T"], key: "t", shift: true, section: "App", action: toggleAlwaysOnTop },
     { id: "updates", label: "Check for updates", icon: "refresh", keys: ["⇧", MOD, "U"], key: "u", shift: true, section: "App", action: () => updater.checkForUpdates() },
     { id: "agents", label: "AI and CLI", icon: "sparkle", keys: [], section: "App", action: () => setView({ kind: "agents" }) },
-    { id: "macro-toggle", label: macro.macroRecording ? "Stop recording the macro" : "Record a macro", icon: "wand", keys: ["⇧", MOD, "M"], key: "m", shift: true, section: "Macros", action: macro.toggleRecording },
+    { id: "macro-toggle", label: "Record a macro", icon: "wand", keys: ["⇧", MOD, "M"], key: "m", shift: true, section: "Macros", hidden: !activeSerial, action: recordMacro },
     { id: "macro-manage", label: "Open macros", icon: "wand", keys: ["⇧", MOD, "L"], key: "l", shift: true, section: "Macros", action: () => setView({ kind: "macros" }) },
     { id: "macro-import", label: "Import macros", icon: "folder", keys: ["⇧", MOD, "I"], key: "i", shift: true, section: "Macros", action: macro.importMacros },
     { id: "macro-export", label: "Export all macros", icon: "copy", keys: ["⇧", MOD, "E"], key: "e", shift: true, section: "Macros", action: macro.exportAllMacros },
-    ...macro.macros.map((m) => ({ id: `macro:${m.name}`, label: m.name, icon: "wand" as const, keys: [], meta: `${m.event_count} events`, section: "Macros", hidden: !connectedDevice, action: () => runMacro(m.name) })),
-  ], [connectedDevice, selectedDevice, mirror, connection.muted, connection.recording, devSettings.perfOverlay, alwaysOnTop, macro.macroRecording, macro.macros, takeScreenshot, pressButton, disconnect, cycleTheme, toggleAlwaysOnTop]);
+    ...macro.macros.map((m) => ({ id: `macro:${m.name}`, label: m.name, icon: "wand" as const, keys: [], meta: `${m.event_count} events`, section: "Macros", hidden: !activeSerial, action: () => runMacro(m.name) })),
+  ], [selectedDevice, selectedMirroring, activeSerial, mirror, devSettings.perfOverlay, alwaysOnTop, macro.macros, cycleTheme, toggleAlwaysOnTop]);
 
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
@@ -663,32 +587,25 @@ function App() {
 
   const shortcuts = commands.filter((c) => c.keys.length > 0 && !c.id.startsWith("macro:")).map((c) => ({ name: c.label, keys: c.keys.join("") }));
 
-  const startSteps = (): StartStep[] => {
-    const inMirror = screen === "another";
-    const serverLabel = devSettings.anotherServer ? "Send the Another server" : "Send the scrcpy server";
-    return [
-      { label: serverLabel, state: inMirror ? "done" : "active" },
-      { label: "Start the encoder", state: !inMirror ? "pending" : connection.streamConfigured ? "done" : "active" },
-      { label: "Open the video stream", state: connection.streamReady ? "done" : connection.streamConfigured ? "active" : "pending" },
-    ];
-  };
-
   const pathLabel = (device: Device) => {
     const kind = deviceKind(device);
     if (kind === "wifi") return devSettings.anotherServer && devSettings.networkStream ? "Wi-Fi, direct stream" : "Wi-Fi";
     return KIND_PATH[kind];
   };
+  const pathLabelRef = useRef(pathLabel);
+  pathLabelRef.current = pathLabel;
 
-  const streamSummary = (network: boolean) =>
-    [resolutionLabel(settings.max_size), `${settings.max_fps} fps`, settings.adaptive || (network && settings.adaptive_network !== false) ? "Adaptive" : null].filter(Boolean).join(" · ");
+  const streamSummary = (network: boolean, refreshHz?: number | null) => {
+    const shown = activePreset === "best" ? bestSettings(network) : settings;
+    const fps = activePreset === "best" ? (refreshHz ? `${refreshHz} fps` : "Full frame rate") : `${shown.max_fps} fps`;
+    return [resolutionLabel(shown.max_size), fps, shown.adaptive || (network && settings.adaptive_network !== false) ? "Adaptive" : null].filter(Boolean).join(" · ");
+  };
 
   const profileOptions = [
     ...(activePreset ? [] : [{ value: "custom", label: "Your settings" }]),
     ...Object.keys(PRESETS).map((p) => ({ value: p, label: PRESET_LABELS[p] ?? p })),
   ];
   const profileControl = { value: activePreset || "custom", options: profileOptions, onChange: (v: string) => { if (v !== "custom") applyPreset(v); } };
-
-  const connectingDevice = connectingSerial ? devices.find((d) => d.serial === connectingSerial) ?? connectedDevice ?? { serial: connectingSerial, model: connectingSerial, state: "device" } : null;
 
   const mainContent = () => {
     if (view?.kind === "macros") {
@@ -697,8 +614,8 @@ function App() {
           macros={macro.macros}
           macrosDir={macro.macrosDir}
           playingMacro={macro.playingMacro}
-          canRun={!!connectedDevice}
-          onRecord={macro.toggleRecording}
+          canRun={!!activeSerial}
+          onRecord={recordMacro}
           onRun={runMacro}
           onRename={macro.renameMacro}
           onDelete={macro.deleteMacro}
@@ -708,7 +625,7 @@ function App() {
       );
     }
     if (view?.kind === "recordings") {
-      return <RecordingsView files={recordings} folder={savePath} canRecord={!!connectedDevice} onOpen={openRecording} onReveal={revealPath} onDelete={deleteRecording} />;
+      return <RecordingsView files={recordings} folder={savePath} canRecord={!!activeSerial} onOpen={openRecording} onReveal={revealPath} onDelete={deleteRecording} />;
     }
     if (view?.kind === "agents") return <AgentsView showToast={showToast} />;
     if (view?.kind === "notifications" && onlineDevice) {
@@ -716,6 +633,7 @@ function App() {
         <NotificationsView
           deviceName={deviceName(onlineDevice)}
           items={notifications.items}
+          icons={notifications.icons}
           systemCenter={notifications.systemCenter}
           onSystemCenter={notifications.setSystemCenter}
           offerCodes={notifications.offerCodes}
@@ -723,9 +641,6 @@ function App() {
           onCopyCode={copyCode}
         />
       );
-    }
-    if (connectingDevice && screen === "welcome") {
-      return <Centered><StartingState name={deviceName(connectingDevice)} brand={deviceMaker(connectingDevice)} path={pathLabel(connectingDevice)} steps={startSteps()} /></Centered>;
     }
     if (dropped && (!view || (view.kind === "device" && view.serial === dropped.device.serial))) {
       const back = devices.find((d) => d.serial === dropped.device.serial && d.state === "device");
@@ -735,7 +650,7 @@ function App() {
             name={deviceName(dropped.device)}
             brand={deviceMaker(dropped.device)}
             reason={networkPrefs.autoReconnect ? `${dropReason(dropped.device)}. Reconnecting when it comes back` : dropReason(dropped.device)}
-            onBack={() => { connection.clearDropped(); setView(devices[0] ? { kind: "device", serial: devices[0].serial } : null); }}
+            onBack={() => { setDropped(null); setView(devices[0] ? { kind: "device", serial: devices[0].serial } : null); }}
             onReconnect={() => (back ? mirror(back) : showToast(`${deviceName(dropped.device)} is not connected yet`, "error", { detail: "Plug it in or bring it back on Wi-Fi, then try again" }))}
           />
         </Centered>
@@ -755,23 +670,25 @@ function App() {
           : kind === "wifi"
             ? { label: "Disconnect", run: () => toggleWifi(selectedDevice), busy: busySerial === selectedDevice.serial }
             : null;
+      const mirrorState = mirrors[selectedDevice.serial];
       return (
         <DeviceView
           title={name}
           brand={brand}
           online
-          status="Ready"
+          status={mirrorState ? (mirrorState.streamReady ? "Mirroring" : "Starting") : "Ready"}
           detail={`${version ? `Android ${version}` : prettyModel(selectedDevice.model)} · ${selectedDevice.serial}`}
           preview={previews.preview(selectedDevice.serial)}
+          facts={deviceFacts ? describeFacts(deviceFacts) : undefined}
           connection={{ icon: KIND_ICON[kind], value: pathLabel(selectedDevice), healthy: true }}
           latency={latency ? `${latency} ms` : "Not measured"}
-          stream={streamSummary(kind === "wifi")}
+          stream={streamSummary(kind === "wifi", deviceFacts?.refresh_hz)}
           profile={profileControl}
           audio={{ checked: settings.audio, onChange: (on) => updateSetting("audio", on) }}
           awake={{ checked: stayAwake, onChange: setStayAwake }}
           secondary={secondary}
           onMirror={() => mirror(selectedDevice)}
-          mirrorBusy={connectingSerial === selectedDevice.serial}
+          mirrorLabel={mirrorState ? "Show window" : undefined}
         />
       );
     }
@@ -797,7 +714,7 @@ function App() {
               : { label: "Forget", run: () => { const next = [...hiddenPeers, selectedPeer.address]; setHiddenPeers(next); localStorage.setItem("hidden_peers", JSON.stringify(next)); } }
           }
           onMirror={() => connectPeer(selectedPeer)}
-          mirrorBusy={busySerial === selectedPeer.address || connectingSerial === selectedPeer.address}
+          mirrorBusy={busySerial === selectedPeer.address}
         />
       );
     }
@@ -805,59 +722,14 @@ function App() {
     return <Centered><EmptyState onConnectByAddress={() => setShowConnect(true)} /></Centered>;
   };
 
-  const mirrorTarget = connectedDevice;
-  const usbTwin = mirrorTarget && isNetworkSerial(mirrorTarget.serial) ? devices.find((d) => d.model === mirrorTarget.model && !isNetworkSerial(d.serial)) : null;
-
   return (
     <>
-      {screen === "another" && mirrorTarget ? (
-        <MirrorScreen
-          name={deviceName(mirrorTarget)}
-          brand={deviceMaker(mirrorTarget)}
-          path={pathLabel(mirrorTarget)}
-          streamReady={connection.streamReady}
-          steps={startSteps()}
-          deviceSize={connection.deviceSize}
-          canvasRef={connection.canvasRef}
-          isMouseDownRef={connection.isMouseDownRef}
-          nativeVideo={connection.nativeActive}
-          latencyMs={connection.latencyMs}
-          perfStats={connection.perfStats}
-          statsOn={devSettings.perfOverlay}
-          recording={connection.recording}
-          muted={connection.muted}
-          macroRecording={macro.macroRecording}
-          pins={pins}
-          onTogglePin={togglePin}
-          macros={macro.macros.map((m) => m.name)}
-          onRunMacro={runMacro}
-          adaptive={adaptiveEnabled ? { tier: adaptive.metrics.tierName, fps: adaptive.metrics.fps, lagMs: adaptive.metrics.lagMs } : null}
-          alwaysOnTop={alwaysOnTop}
-          onToggleAlwaysOnTop={toggleAlwaysOnTop}
-          onOpenSettings={() => openSettings()}
-          reconnecting={connectingSerial && connection.streamReady ? { message: "Reconnecting", action: usbTwin ? { label: "Use USB", run: () => connectToDevice(usbTwin, settings) } : undefined } : null}
-          onToggleStats={toggleStats}
-          onToggleRecording={toggleRecording}
-          onToggleMacroRecording={macro.toggleRecording}
-          onToggleMute={() => connection.setMuted(!connection.muted)}
-          onScreenshot={takeScreenshot}
-          onRotate={rotate}
-          onPressButton={pressButton}
-          onOpenCommandBar={() => setShowCommandBar(true)}
-          onDisconnect={disconnect}
-          onCanvasMouseEvent={connection.handleCanvasMouseEvent}
-          onWheel={connection.handleWheel}
-          onKeyDown={connection.handleKeyDown}
-          onCompositionStart={connection.handleCompositionStart}
-          onCompositionEnd={connection.handleCompositionEnd}
-        />
-      ) : (
         <div className="app-window relative">
           <Sidebar
             devices={devices}
             tailnetPeers={sidebarPeers}
             view={view}
-            onSelect={(next) => { connection.clearDropped(); setView(next); }}
+            onSelect={(next) => { setDropped(null); setView(next); }}
             actions={actions}
             macroCount={macro.macros.length}
             recordingCount={recordings.length}
@@ -869,7 +741,6 @@ function App() {
           <main className="card scroll flex-1 min-w-0 p-8">{mainContent()}</main>
           {showNews && <WhatsNew start={LATEST_NEWS} onClose={closeNews} onAction={actOnNews} />}
         </div>
-      )}
 
       <SettingsDialog
         open={showSettings}
@@ -895,13 +766,15 @@ function App() {
         tailscaleRunning={!!tailnet.status?.running}
         shortcuts={shortcuts}
         profileSummary={streamSummary(false)}
-        latencyProbe={connectedDevice ? latencyProbe : null}
+        latencyProbe={activeMirror ? { ...activeMirror.probe, run: () => sendToMirror(activeMirror.serial, { action: "measure" }) } : null}
         onExportProfile={profiles.exportProfile}
         onImportProfile={profiles.importProfile}
         onCopyProfileLink={profiles.copyProfileLink}
         version={version}
         onCheckForUpdates={() => updater.checkForUpdates()}
         onWhatsNew={() => { setShowSettings(false); setShowNews(true); }}
+        onConnectPhone={() => { setShowSettings(false); setShowConnect(true); }}
+        onOpenAgents={() => { setShowSettings(false); setView({ kind: "agents" }); }}
       />
       <ConnectDialog
         open={showConnect}
@@ -912,7 +785,15 @@ function App() {
         showToast={showToast}
       />
       <CommandBar open={showCommandBar} onOpenChange={setShowCommandBar} commands={commands} />
-      <NotificationBanners banners={notifications.banners} onDismiss={notifications.dismissBanner} onCopyCode={copyCode} onOpen={openOnPhone} />
+      <ConfirmDialog
+        open={!!linkCommand}
+        title="Allow this link?"
+        detail={linkCommand ? describeLink(linkCommand) : ""}
+        action="Allow"
+        danger={false}
+        onCancel={() => setLinkQueue((queue) => queue.slice(1))}
+        onConfirm={() => { if (linkCommand) remoteHandlerRef.current(linkCommand); setLinkQueue((queue) => queue.slice(1)); }}
+      />
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </>
   );

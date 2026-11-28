@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { Device, Settings, FrameEvent, Screen, MacroEvent, PerfStats, EncoderTuning, DevSettings, ShowToast } from "../types";
 
 const FRAME_PAD = 8;
@@ -9,15 +9,19 @@ const TITLE_H = 36;
 const RAIL_W = 32;
 export const CHROME_W = FRAME_PAD * 3 + RAIL_W;
 export const CHROME_H = FRAME_PAD * 3 + TITLE_H;
-export const MAIN_WINDOW = { width: 1120, height: 760 };
-const MAIN_MIN = new LogicalSize(720, 520);
-const MIRROR_MIN = new LogicalSize(280 + CHROME_W, 240 + CHROME_H);
+export const MIRROR_MIN = new LogicalSize(280 + CHROME_W, 240 + CHROME_H);
 const MAX_VIEW = 860;
 const PERF_INTERVAL_MS = 1000;
 const VIDEO_KIND_CONFIG = 0;
 const VIDEO_KIND_KEY = 1;
 const VIDEO_HEADER_LEN = 25;
 const MAX_TRACKED_DECODES = 300;
+const RECORD_FPS = 30;
+const RECORDING_FORMATS = [
+  { mime: "video/webm;codecs=vp9", ext: "webm" },
+  { mime: "video/webm", ext: "webm" },
+  { mime: "video/mp4", ext: "mp4" },
+];
 
 interface PerfCounters {
   packets: number;
@@ -57,11 +61,26 @@ const epochNow = () => performance.timeOrigin + performance.now();
 
 const SAME_ASPECT_TOLERANCE = 0.02;
 
-function windowSizeFor(width: number, height: number) {
+export function windowSizeFor(width: number, height: number) {
   const aspect = width / height;
   const viewW = aspect > 1 ? MAX_VIEW : Math.round(MAX_VIEW * aspect);
   const viewH = aspect > 1 ? Math.round(MAX_VIEW / aspect) : MAX_VIEW;
   return new LogicalSize(Math.max(viewW, 280) + CHROME_W, viewH + CHROME_H);
+}
+
+function evenSize(n: number) {
+  return Math.max(2, Math.round(n / 2) * 2);
+}
+
+function drawFitted(target: HTMLCanvasElement, source: CanvasImageSource, sourceW: number, sourceH: number) {
+  const ctx = target.getContext("2d");
+  if (!ctx) return;
+  ctx.fillRect(0, 0, target.width, target.height);
+  if (!sourceW || !sourceH) return;
+  const scale = Math.min(target.width / sourceW, target.height / sourceH);
+  const width = sourceW * scale;
+  const height = sourceH * scale;
+  ctx.drawImage(source, (target.width - width) / 2, (target.height - height) / 2, width, height);
 }
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -85,6 +104,13 @@ interface UseConnectionOptions {
   onNativeStats?: (fps: number, lagMinMs: number) => void;
   onCodecFallback?: (codec: string) => void;
   onRecordEvent?: (event: MacroEvent) => void;
+  /** The phone went away without the user stopping; the reason says why. */
+  onDropped?: (reason: string) => void;
+  /** The Disconnect menu item, which closes the mirror window. */
+  onDisconnectRequested?: () => void;
+  /** Window size for a phone screen of this size, when the first frame arrives. */
+  initialSize?: (width: number, height: number) => LogicalSize;
+  onRecordingSaved?: () => void;
   perfOverlay?: boolean;
   directAdb?: boolean;
   lowLatency?: boolean;
@@ -109,8 +135,17 @@ export function useConnection(opts: UseConnectionOptions) {
   const isMouseDownRef = useRef(false);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isReconnecting = useRef(false);
+  const mutedRef = useRef(false);
+  mutedRef.current = muted;
   const recorderRef = useRef<MediaRecorder | null>(null);
-  const recordedChunks = useRef<Blob[]>([]);
+  /** Settles once the last recording has been written, so a closing window can wait for it. */
+  const recordingSaved = useRef<Promise<void>>(Promise.resolve());
+  const recordCanvas = useRef<HTMLCanvasElement | null>(null);
+  const recordDecoder = useRef<VideoDecoder | null>(null);
+  const recordAwaitingKey = useRef(true);
+  const recordWarned = useRef(false);
+  const onRecordingSavedRef = useRef(opts.onRecordingSaved);
+  onRecordingSavedRef.current = opts.onRecordingSaved;
   const nativeSize = useRef({ width: 1080, height: 1920 });
   const displaySizeRef = useRef({ width: 1080, height: 1920 });
   const resizeSnapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -121,8 +156,7 @@ export function useConnection(opts: UseConnectionOptions) {
   const [streamReady, setStreamReady] = useState(false);
   const [streamConfigured, setStreamConfigured] = useState(false);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
-  const [dropped, setDropped] = useState<{ device: Device; reason: string } | null>(null);
-  const mainSize = useRef<LogicalSize | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
   const streamReadyRef = useRef(false);
   const perfCounters = useRef<PerfCounters>(emptyCounters());
   const decodeStarts = useRef(new Map<number, number>());
@@ -178,9 +212,62 @@ export function useConnection(opts: UseConnectionOptions) {
     decoderRef.current = null;
     pendingPackets.current = [];
     awaitingKeyFrame.current = true;
-    setMutedState(false);
-    if (recorderRef.current && recorderRef.current.state === "recording") {
-      recorderRef.current.stop();
+  }, []);
+
+  const closeRecordDecoder = useCallback(() => {
+    const decoder = recordDecoder.current;
+    recordDecoder.current = null;
+    if (decoder && decoder.state !== "closed") decoder.close();
+  }, []);
+
+  const stopRecording = useCallback(() => {
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    recordCanvas.current?.remove();
+    recordCanvas.current = null;
+    closeRecordDecoder();
+    setRecording(false);
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+    invoke("set_record_feed", { enabled: false }).catch(() => { });
+  }, [closeRecordDecoder]);
+
+  const handleRecordConfig = useCallback((codec: string, description: Uint8Array) => {
+    closeRecordDecoder();
+    if (!recordCanvas.current) return;
+    const decoder: VideoDecoder = new VideoDecoder({
+      output: (frame: VideoFrame) => {
+        const target = recordCanvas.current;
+        if (target) drawFitted(target, frame, frame.displayWidth, frame.displayHeight);
+        frame.close();
+      },
+      error: (e: DOMException) => {
+        console.error("Recording decoder error:", e);
+        if (recordDecoder.current === decoder) recordDecoder.current = null;
+        if (recordWarned.current) return;
+        recordWarned.current = true;
+        const hevc = codec.startsWith("hev1") || codec.startsWith("hvc1");
+        showToast("The recording has no picture", "error", {
+          detail: hevc ? "This Mac cannot decode H.265 for recording. Switch the codec to H.264 in Settings, then record again" : e.message,
+        });
+      },
+    });
+    decoder.configure({ codec, description, hardwareAcceleration: "prefer-hardware", optimizeForLatency: true });
+    recordDecoder.current = decoder;
+    recordAwaitingKey.current = true;
+  }, [closeRecordDecoder, showToast]);
+
+  const feedRecordPacket = useCallback((key: boolean, timestamp: number, data: Uint8Array) => {
+    const decoder = recordDecoder.current;
+    if (!decoder || decoder.state !== "configured") return;
+    if (recordAwaitingKey.current) {
+      if (!key) return;
+      recordAwaitingKey.current = false;
+    }
+    try {
+      decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp, data }));
+    } catch (e) {
+      console.error("Recording decode failed:", e);
+      recordAwaitingKey.current = true;
     }
   }, []);
 
@@ -206,21 +293,6 @@ export function useConnection(opts: UseConnectionOptions) {
     }
   }, []);
 
-  const restoreMainSize = async () => {
-    const size = mainSize.current ?? new LogicalSize(MAIN_WINDOW.width, MAIN_WINDOW.height);
-    mainSize.current = null;
-    setNativeActive(false);
-    try {
-      isProgrammaticResize.current = true;
-      const win = getCurrentWindow();
-      await win.setMinSize(MAIN_MIN);
-      await win.setSize(new LogicalSize(Math.max(size.width, MAIN_MIN.width), Math.max(size.height, MAIN_MIN.height)));
-    } catch {
-    } finally {
-      isProgrammaticResize.current = false;
-    }
-  };
-
   const connectToDevice = useCallback(async (device: Device, s: Settings, silent = false, dev?: DevSettings) => {
     if (dev) {
       directAdbRef.current = dev.directAdb;
@@ -231,6 +303,11 @@ export function useConnection(opts: UseConnectionOptions) {
       networkStreamRef.current = dev.networkStream;
       perfOverlayRef.current = dev.perfOverlay;
     }
+    if (!silent && reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    if (!silent) {
+      stopRecording();
+      setMutedState(false);
+    }
     const gen = ++connectionGen.current;
     const keepLastFrame = silent && streamReadyRef.current;
     if (!keepLastFrame) {
@@ -238,14 +315,7 @@ export function useConnection(opts: UseConnectionOptions) {
       setStreamReady(false);
     }
     setConnectingSerial(device.serial);
-    setDropped(null);
-    if (!silent && !mainSize.current) {
-      try {
-        const win = getCurrentWindow();
-        mainSize.current = (await win.innerSize()).toLogical(await win.scaleFactor());
-        await win.setMinSize(MIRROR_MIN);
-      } catch { }
-    }
+    setFailure(null);
     if (!keepLastFrame) {
       setStreamConfigured(false);
       setLatencyMs(null);
@@ -320,6 +390,7 @@ export function useConnection(opts: UseConnectionOptions) {
                   resizeToFrame(canvas, f.displayWidth, f.displayHeight);
                   const ctx = canvas.getContext("2d");
                   if (ctx) ctx.drawImage(f, 0, 0);
+                  if (recordCanvas.current) drawFitted(recordCanvas.current, f, f.displayWidth, f.displayHeight);
                   frameDrawnRef.current?.();
                   const captureMs = captureTimes.current.get(f.timestamp);
                   if (captureMs !== undefined) {
@@ -410,6 +481,10 @@ export function useConnection(opts: UseConnectionOptions) {
           handleConfig(msg.data.codec, b64ToBytes(msg.data.description));
         } else if (msg.event === "packet") {
           handlePacket(msg.data.key, msg.data.timestamp, msg.data.recv_ms, msg.data.capture_ms, b64ToBytes(msg.data.data));
+        } else if (msg.event === "record_config") {
+          handleRecordConfig(msg.data.codec, b64ToBytes(msg.data.description));
+        } else if (msg.event === "record_packet") {
+          feedRecordPacket(msg.data.key, msg.data.timestamp, b64ToBytes(msg.data.data));
         } else if (msg.event === "native_size") {
           const canvas = canvasRef.current;
           if (canvas) resizeToFrame(canvas, msg.data.width, msg.data.height);
@@ -441,10 +516,12 @@ export function useConnection(opts: UseConnectionOptions) {
           cleanupDecoder();
           closeVideoSocket();
           if (!isReconnecting.current) {
+            stopRecording();
+            setMutedState(false);
             setConnectedDevice(null);
             setScreen("welcome");
-            setDropped({ device, reason: msg.data.reason });
-            restoreMainSize();
+            setNativeActive(false);
+            opts.onDropped?.(msg.data.reason);
           }
         }
       };
@@ -465,6 +542,7 @@ export function useConnection(opts: UseConnectionOptions) {
       });
       if (gen !== connectionGen.current) return;
       setNativeActive(native);
+      if (silent && mutedRef.current) invoke("set_muted", { muted: true }).catch(() => { });
       if (videoUrl) {
         const ws = new WebSocket(videoUrl);
         ws.binaryType = "arraybuffer";
@@ -501,11 +579,13 @@ export function useConnection(opts: UseConnectionOptions) {
       setConnectedDevice(device);
       setScreen("another");
 
-      isProgrammaticResize.current = true;
-      await getCurrentWindow().setSize(windowSizeFor(width, height));
-      isProgrammaticResize.current = false;
+      if (!silent) {
+        isProgrammaticResize.current = true;
+        await getCurrentWindow().setSize((opts.initialSize ?? windowSizeFor)(width, height));
+        isProgrammaticResize.current = false;
+      }
     } catch (e) {
-      if (!silent) showToast(`Could not mirror ${device.model.replace(/_/g, " ")}`, "error", { detail: `${e}` });
+      if (!silent) setFailure(`${e}`);
       else if (gen === connectionGen.current) {
         streamReadyRef.current = false;
         setStreamReady(false);
@@ -517,7 +597,7 @@ export function useConnection(opts: UseConnectionOptions) {
         isReconnecting.current = false;
       }
     }
-  }, [showToast, cleanupDecoder, feedChunk, closeVideoSocket]);
+  }, [showToast, cleanupDecoder, feedChunk, closeVideoSocket, stopRecording, handleRecordConfig, feedRecordPacket]);
   reconnectRef.current = (device, s) => { connectToDevice(device, s, true); };
 
   const disconnect = useCallback(async () => {
@@ -525,11 +605,13 @@ export function useConnection(opts: UseConnectionOptions) {
     isReconnecting.current = false;
     cleanupDecoder();
     closeVideoSocket();
+    stopRecording();
+    setMutedState(false);
     try { await invoke("disconnect_device"); } catch { }
     setConnectedDevice(null);
     setScreen("welcome");
-    await restoreMainSize();
-  }, [cleanupDecoder, closeVideoSocket]);
+    setNativeActive(false);
+  }, [cleanupDecoder, closeVideoSocket, stopRecording]);
 
   const scheduleReconnect = useCallback((s: Settings) => {
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
@@ -542,55 +624,74 @@ export function useConnection(opts: UseConnectionOptions) {
   }, [connectedDevice, connectToDevice]);
 
   const toggleRecording = useCallback(() => {
-    if (recorderRef.current && recorderRef.current.state === "recording") {
-      recorderRef.current.stop();
+    if (recorderRef.current) {
+      stopRecording();
       return;
     }
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const stream = canvas.captureStream(30);
-    recordedChunks.current = [];
-    const recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
+    const source = canvasRef.current;
+    if (!source) return;
+    const format = RECORDING_FORMATS.find((f) => MediaRecorder.isTypeSupported(f.mime));
+    if (!format) {
+      showToast("Could not record the screen", "error", { detail: "This Mac cannot encode video for recording" });
+      return;
+    }
+    const target = document.createElement("canvas");
+    target.width = evenSize(source.width);
+    target.height = evenSize(source.height);
+    target.setAttribute("aria-hidden", "true");
+    target.style.cssText = "position:fixed;left:-100000px;top:0;pointer-events:none";
+    document.body.appendChild(target);
+    drawFitted(target, source, source.width, source.height);
+    const chunks: Blob[] = [];
+    const recorder = new MediaRecorder(target.captureStream(RECORD_FPS), { mimeType: format.mime });
     recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) recordedChunks.current.push(e.data);
+      if (e.data.size > 0) chunks.push(e.data);
     };
+    let markSaved = () => { };
+    recordingSaved.current = new Promise<void>((resolve) => { markSaved = resolve; });
     recorder.onstop = async () => {
-      const blob = new Blob(recordedChunks.current, { type: "video/webm" });
+      try {
+        await saveRecording();
+      } finally {
+        markSaved();
+      }
+    };
+    const saveRecording = async () => {
+      const blob = new Blob(chunks, { type: format.mime.split(";")[0] });
+      const filename = `recording-${Date.now()}.${format.ext}`;
       const savePath = localStorage.getItem("save_path");
       if (savePath) {
         try {
-          const buffer = await blob.arrayBuffer();
-          const bytes = new Uint8Array(buffer);
-          let binary = "";
-          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-          const base64 = btoa(binary);
-          const filename = `recording-${Date.now()}.webm`;
-          await invoke("save_file", { path: `${savePath}/${filename}`, data: base64 });
-        } catch {
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = `recording-${Date.now()}.webm`;
-          link.click();
-          URL.revokeObjectURL(url);
-        }
-      } else {
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `recording-${Date.now()}.webm`;
-        link.click();
-        URL.revokeObjectURL(url);
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          const path = String.fromCharCode(...new TextEncoder().encode(`${savePath}/${filename}`));
+          await invoke("save_bytes", bytes, { headers: { path: btoa(path) } });
+          onRecordingSavedRef.current?.();
+          showToast("Recording saved", "success");
+          return;
+        } catch { }
       }
-      recordedChunks.current = [];
-      recorderRef.current = null;
-      setRecording(false);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
       showToast("Recording saved", "success");
     };
-    recorder.start(100);
+    recordCanvas.current = target;
     recorderRef.current = recorder;
+    recorder.start(100);
     setRecording(true);
-  }, [showToast]);
+    recordWarned.current = false;
+    invoke("set_record_feed", { enabled: true }).catch(() => { });
+    if (anotherServerRef.current) invoke("request_key_frame").catch(() => { });
+  }, [showToast, stopRecording]);
+
+  /** Stops a recording in progress and resolves once its file is saved. */
+  const finishRecording = useCallback(async () => {
+    if (recorderRef.current) stopRecording();
+    await recordingSaved.current;
+  }, [stopRecording]);
 
   const pressButton = useCallback(async (button: string) => {
     opts.onRecordEvent?.({ type: "button", button });
@@ -703,10 +804,11 @@ export function useConnection(opts: UseConnectionOptions) {
   }, [screen]);
 
   useEffect(() => {
-    const unlisten = listen<string>("menu-event", (event) => {
+    const unlisten = getCurrentWebviewWindow().listen<string>("menu-event", (event) => {
       const id = event.payload;
       if (id === "disconnect") {
-        disconnect();
+        if (opts.onDisconnectRequested) opts.onDisconnectRequested();
+        else disconnect();
       } else if (id === "toggle_theme") {
         opts.setThemePref((p) => p === "dark" ? "light" : p === "light" ? "dark" : "light");
       } else if (id === "settings") {
@@ -767,8 +869,7 @@ export function useConnection(opts: UseConnectionOptions) {
     streamReady,
     streamConfigured,
     latencyMs,
-    dropped,
-    clearDropped: () => setDropped(null),
+    failure,
     perfStats,
     nativeActive,
     canvasRef,
@@ -779,6 +880,7 @@ export function useConnection(opts: UseConnectionOptions) {
     recording,
     setMuted,
     toggleRecording,
+    finishRecording,
     connectToDevice,
     disconnect,
     scheduleReconnect,

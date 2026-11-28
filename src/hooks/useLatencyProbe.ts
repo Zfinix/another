@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { cleanError } from "../lib/errors";
 
 const TRIALS = 12;
 const WARMUP_TRIALS = 1;
@@ -123,7 +124,7 @@ export function useLatencyProbe({ canvasRef, frameDrawnRef, native }: UseLatency
       setResult(next);
       invoke("log_perf", { stats: { latencyProbe: next, renderer: native ? "native" : "web", latencies } }).catch(() => { });
     } catch (e) {
-      setError(String(e));
+      setError(cleanError(e));
     } finally {
       frameDrawnRef.current = null;
       if (previousShowTouches !== null) {

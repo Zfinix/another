@@ -190,7 +190,7 @@ export function Sidebar({
       <div className="flex flex-col gap-0.5">
         <button type="button" className="item" style={{ color: "var(--muted)" }} onClick={onConnectByAddress}>
           <Icon name="add" />
-          <span className="flex-1 text-left">Connect by address</span>
+          <span className="flex-1 text-left">Connect a phone</span>
         </button>
         <button type="button" className="item" style={{ color: "var(--muted)" }} onClick={onOpenSettings}>
           <Icon name="settings" />

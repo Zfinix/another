@@ -1,18 +1,19 @@
 use another_core::{adb, control, macro_engine, scrcpy};
 use another_core::scrcpy::StreamSettings;
 use crate::audio::{self, AudioHandle};
-use crate::state::{AppState, ScrcpySession};
+use crate::state::{apply_audio_focus, AppState, ScrcpySession};
 use crate::native_video;
 use crate::remote::RemoteState;
 use crate::stream_ws;
 use crate::video::{self, FrameEvent};
 use base64::Engine;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -24,21 +25,50 @@ pub async fn list_devices() -> Result<Vec<adb::Device>, String> {
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 const VIEWER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Ends the session a window shows when `ends` agrees: stops its server and puts back the phone's
+/// stay-awake setting. Each window shows one phone, so no other session needs that setting.
+async fn finish_session(
+    sessions: &Mutex<HashMap<String, ScrcpySession>>,
+    stay_on: &Mutex<HashMap<String, String>>,
+    label: &str,
+    ends: impl FnOnce(&ScrcpySession) -> bool,
+) {
+    let session = {
+        let mut sessions = sessions.lock().await;
+        match sessions.get(label) {
+            Some(current) if ends(current) => sessions.remove(label),
+            _ => None,
+        }
+    };
+    if let Some(session) = session {
+        session.shutdown.notify_one();
+        scrcpy::stop_server(&session.device_serial, session.port.port).await;
+        restore_stay_on(stay_on, &session.device_serial).await;
+    }
+}
+
+/// Stops the session shown in a window, if there is one.
+pub async fn end_session(state: &AppState, label: &str) {
+    finish_session(&state.sessions, &state.stay_on, label, |_| true).await;
+}
+
+/// Stops a window's session only if it was started before page load `page`, so the session the
+/// reloaded page starts is left alone.
+pub async fn end_session_before_page(state: &AppState, label: &str, page: u64) {
+    finish_session(&state.sessions, &state.stay_on, label, |session| session.page < page).await;
+}
+
 #[tauri::command]
 pub async fn connect_device(
     app: AppHandle,
+    window: WebviewWindow,
     serial: String,
     on_frame: Channel<FrameEvent>,
     settings: StreamSettings,
     state: State<'_, AppState>,
 ) -> Result<(u32, u32, Option<String>, bool), String> {
-    {
-        let mut session = state.session.lock().await;
-        if let Some(s) = session.take() {
-            s.shutdown.notify_one();
-            scrcpy::stop_server(&s.device_serial, 27183).await;
-        }
-    }
+    let label = window.label().to_string();
+    end_session(&state, &label).await;
 
     let resource_dir = app
         .path()
@@ -47,19 +77,18 @@ pub async fn connect_device(
     let server_path = resource_dir.join("resources").join(settings.server_file());
     let server_path_str = server_path.to_string_lossy().to_string();
 
-    let port: u16 = 27183;
+    let lease = state
+        .lease_port()
+        .ok_or("Too many phones are mirroring at once. Close one and try again")?;
+    let port = lease.port;
 
     let native = if settings.native_video {
-        let window = app
-            .get_webview_window("main")
-            .or_else(|| app.webview_windows().into_values().next());
-        match window.map(|w| native_video::NativeVideo::attach(w, on_frame.clone())) {
-            Some(Ok(native)) => Some(native),
-            Some(Err(e)) => {
+        match native_video::NativeVideo::attach(window.clone(), on_frame.clone()) {
+            Ok(native) => Some(native),
+            Err(e) => {
                 eprintln!("[native-video] falling back to the web renderer: {}", e);
                 None
             }
-            None => None,
         }
     } else {
         None
@@ -80,14 +109,14 @@ pub async fn connect_device(
     let (streams, mut server_process) =
         scrcpy::start_server(&serial, &server_path_str, port, &settings)
             .await
-            .map_err(|e| format!("Failed to start scrcpy server: {}", e))?;
+            .map_err(|e| format!("Could not start mirroring: {}", e))?;
 
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let control_socket = Arc::new(Mutex::new(streams.control_socket));
 
     let audio_handle = if let Some(audio_socket) = streams.audio_socket {
         let handle = AudioHandle::new()
-            .map_err(|e| format!("Failed to init audio: {}", e))?;
+            .map_err(|e| format!("Could not play the phone audio: {}", e))?;
         let handle = Arc::new(handle);
         let audio_shutdown = shutdown.clone();
         let audio_ref = handle.clone();
@@ -99,6 +128,9 @@ pub async fn connect_device(
         None
     };
 
+    // Asked before taking any lock: on macOS it waits for the main thread, which quitting blocks on these locks.
+    let focused = window.is_focused().unwrap_or(false);
+    let page = state.page(&label);
     let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let session = ScrcpySession {
         id: session_id,
@@ -108,19 +140,31 @@ pub async fn connect_device(
         screen_height: streams.screen_height,
         shutdown: shutdown.clone(),
         audio: audio_handle,
+        muted: false,
         live_video_control: settings.another_server,
+        port: lease,
+        page,
     };
 
     let width = streams.screen_width;
     let height = streams.screen_height;
 
     {
-        let mut s = state.session.lock().await;
-        *s = Some(session);
+        let mut sessions = state.sessions.lock().await;
+        if let Some(replaced) = sessions.insert(label.clone(), session) {
+            replaced.shutdown.notify_one();
+        }
+        let mut focus = state.audio_focus.lock().await;
+        let focus_is_stale = focus.as_ref().is_none_or(|current| !sessions.contains_key(current));
+        if focus_is_stale || focused {
+            *focus = Some(label.clone());
+        }
+        apply_audio_focus(&sessions, focus.as_deref());
     }
 
-    let session_arc = state.session.clone();
-    let serial_clone = serial.clone();
+    let sessions_arc = state.sessions.clone();
+    let stay_on_arc = state.stay_on.clone();
+    let video_label = label.clone();
 
     let video_codec = if settings.video_codec == "h265" {
         video::VideoCodec::H265
@@ -135,7 +179,7 @@ pub async fn connect_device(
         };
         match ws {
             Ok(ws) => {
-                video::stream_video(streams.video_socket, on_frame, ws, native, shutdown.clone(), video_codec)
+                video::stream_video(video_label, streams.video_socket, on_frame, ws, native, shutdown.clone(), video_codec)
                     .await
             }
             Err(e) => {
@@ -145,12 +189,7 @@ pub async fn connect_device(
             }
         }
         let _ = server_process.kill().await;
-        let mut s = session_arc.lock().await;
-        if s.as_ref().is_some_and(|current| current.id == session_id) {
-            *s = None;
-            drop(s);
-            scrcpy::stop_server(&serial_clone, port).await;
-        }
+        finish_session(&sessions_arc, &stay_on_arc, &label, |current| current.id == session_id).await;
     });
 
     Ok((width, height, ws_url, native_active))
@@ -159,19 +198,19 @@ pub async fn connect_device(
 const NATIVE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 #[tauri::command]
-pub async fn native_latency_probe(x: f64, y: f64, state: State<'_, AppState>) -> Result<f64, String> {
+pub async fn native_latency_probe(window: WebviewWindow, x: f64, y: f64, state: State<'_, AppState>) -> Result<f64, String> {
     let (socket, width, height) = {
-        let session = state.session.lock().await;
-        let session = session.as_ref().ok_or("Not connected")?;
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get(window.label()).ok_or("Not connected")?;
         (session.control_socket.clone(), session.screen_width, session.screen_height)
     };
     let px = (x * width as f64) as u32;
     let py = (y * height as f64) as u32;
-    let seen = native_video::arm_probe(x, y).map_err(|e| e.to_string())?;
+    let seen = native_video::arm_probe(window.label(), x, y).map_err(|e| e.to_string())?;
     let started = std::time::Instant::now();
     let pressed = control::inject_touch(&socket, "down", px, py, width as u16, height as u16).await;
     let result = tokio::task::spawn_blocking(move || seen.recv_timeout(NATIVE_PROBE_TIMEOUT)).await;
-    native_video::disarm_probe();
+    native_video::disarm_probe(window.label());
     let _ = control::inject_touch(&socket, "up", px, py, width as u16, height as u16).await;
     pressed.map_err(|e| e.to_string())?;
     match result {
@@ -181,44 +220,38 @@ pub async fn native_latency_probe(x: f64, y: f64, state: State<'_, AppState>) ->
 }
 
 #[tauri::command]
-pub fn set_native_video_frame(x: f64, y: f64, width: f64, height: f64) {
-    native_video::set_frame(x, y, width, height);
+pub fn set_native_video_frame(window: WebviewWindow, x: f64, y: f64, width: f64, height: f64) {
+    native_video::set_frame(window.label(), x, y, width, height);
 }
 
 #[tauri::command]
-pub async fn disconnect_device(state: State<'_, AppState>) -> Result<(), String> {
-    native_video::detach();
-    let mut session = state.session.lock().await;
-    if let Some(s) = session.take() {
-        s.shutdown.notify_one();
-        scrcpy::stop_server(&s.device_serial, 27183).await;
-    }
+pub async fn disconnect_device(window: WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    native_video::detach(window.label());
+    video::set_record_feed(window.label(), false);
+    end_session(&state, window.label()).await;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn set_muted(muted: bool, state: State<'_, AppState>) -> Result<(), String> {
-    let session = state.session.lock().await;
-    let session = session.as_ref().ok_or("Not connected")?;
-    if let Some(audio) = &session.audio {
-        if muted {
-            audio.sink.set_volume(0.0);
-        } else {
-            audio.sink.set_volume(1.0);
-        }
-    }
+pub async fn set_muted(window: WebviewWindow, muted: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let mut sessions = state.sessions.lock().await;
+    let session = sessions.get_mut(window.label()).ok_or("Not connected")?;
+    session.muted = muted;
+    let focus = state.audio_focus.lock().await;
+    apply_audio_focus(&sessions, focus.as_deref());
     Ok(())
 }
 
 #[tauri::command]
 pub async fn send_touch(
+    window: WebviewWindow,
     action: String,
     x: f64,
     y: f64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let session = state.session.lock().await;
-    let session = session.as_ref().ok_or("Not connected")?;
+    let sessions = state.sessions.lock().await;
+    let session = sessions.get(window.label()).ok_or("Not connected")?;
     let px = (x * session.screen_width as f64) as u32;
     let py = (y * session.screen_height as f64) as u32;
     control::inject_touch(
@@ -235,21 +268,22 @@ pub async fn send_touch(
 
 #[tauri::command]
 pub async fn send_key(
+    window: WebviewWindow,
     keycode: u32,
     action: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let session = state.session.lock().await;
-    let session = session.as_ref().ok_or("Not connected")?;
+    let sessions = state.sessions.lock().await;
+    let session = sessions.get(window.label()).ok_or("Not connected")?;
     control::inject_keycode(&session.control_socket, &action, keycode, 0, 0)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn send_text(text: String, state: State<'_, AppState>) -> Result<(), String> {
-    let session = state.session.lock().await;
-    let session = session.as_ref().ok_or("Not connected")?;
+pub async fn send_text(window: WebviewWindow, text: String, state: State<'_, AppState>) -> Result<(), String> {
+    let sessions = state.sessions.lock().await;
+    let session = sessions.get(window.label()).ok_or("Not connected")?;
     control::inject_text(&session.control_socket, &text)
         .await
         .map_err(|e| e.to_string())
@@ -257,14 +291,15 @@ pub async fn send_text(text: String, state: State<'_, AppState>) -> Result<(), S
 
 #[tauri::command]
 pub async fn send_scroll(
+    window: WebviewWindow,
     x: f64,
     y: f64,
     dx: f64,
     dy: f64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let session = state.session.lock().await;
-    let session = session.as_ref().ok_or("Not connected")?;
+    let sessions = state.sessions.lock().await;
+    let session = sessions.get(window.label()).ok_or("Not connected")?;
     let px = (x * session.screen_width as f64) as u32;
     let py = (y * session.screen_height as f64) as u32;
     let sx = (dx * 120.0) as i16;
@@ -283,9 +318,9 @@ pub async fn send_scroll(
 }
 
 #[tauri::command]
-pub async fn take_screenshot(state: State<'_, AppState>) -> Result<String, String> {
-    let session = state.session.lock().await;
-    let session = session.as_ref().ok_or("Not connected")?;
+pub async fn take_screenshot(window: WebviewWindow, state: State<'_, AppState>) -> Result<String, String> {
+    let sessions = state.sessions.lock().await;
+    let session = sessions.get(window.label()).ok_or("Not connected")?;
     let png_data = adb::exec_out_screencap(&session.device_serial)
         .await
         .map_err(|e| e.to_string())?;
@@ -293,9 +328,9 @@ pub async fn take_screenshot(state: State<'_, AppState>) -> Result<String, Strin
 }
 
 #[tauri::command]
-pub async fn press_button(button: String, state: State<'_, AppState>) -> Result<(), String> {
-    let session = state.session.lock().await;
-    let session = session.as_ref().ok_or("Not connected")?;
+pub async fn press_button(window: WebviewWindow, button: String, state: State<'_, AppState>) -> Result<(), String> {
+    let sessions = state.sessions.lock().await;
+    let session = sessions.get(window.label()).ok_or("Not connected")?;
     let keycode = match button.as_str() {
         "home" => control::KEYCODE_HOME,
         "back" => control::KEYCODE_BACK,
@@ -314,27 +349,27 @@ pub async fn press_button(button: String, state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-pub async fn update_screen_size(width: u32, height: u32, state: State<'_, AppState>) -> Result<(), String> {
-    let mut session = state.session.lock().await;
-    let session = session.as_mut().ok_or("Not connected")?;
+pub async fn update_screen_size(window: WebviewWindow, width: u32, height: u32, state: State<'_, AppState>) -> Result<(), String> {
+    let mut sessions = state.sessions.lock().await;
+    let session = sessions.get_mut(window.label()).ok_or("Not connected")?;
     session.screen_width = width;
     session.screen_height = height;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn rotate_device(state: State<'_, AppState>) -> Result<(), String> {
-    let session = state.session.lock().await;
-    let session = session.as_ref().ok_or("Not connected")?;
+pub async fn rotate_device(window: WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    let sessions = state.sessions.lock().await;
+    let session = sessions.get(window.label()).ok_or("Not connected")?;
     control::rotate_device(&session.control_socket)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn wake_screen(state: State<'_, AppState>) -> Result<(), String> {
-    let session = state.session.lock().await;
-    let session = session.as_ref().ok_or("Not connected")?;
+pub async fn wake_screen(window: WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    let sessions = state.sessions.lock().await;
+    let session = sessions.get(window.label()).ok_or("Not connected")?;
 
     let is_on = adb::shell(&session.device_serial, "dumpsys power | grep 'Display Power'")
         .await
@@ -371,12 +406,13 @@ pub async fn wake_screen(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn play_macro(
+    window: WebviewWindow,
     events: Vec<macro_engine::TimedEvent>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let (socket, sw, sh) = {
-        let session = state.session.lock().await;
-        let session = session.as_ref().ok_or("Not connected")?;
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get(window.label()).ok_or("Not connected")?;
         (
             session.control_socket.clone(),
             session.screen_width,
@@ -567,13 +603,33 @@ pub async fn save_file(path: String, data: String) -> Result<(), String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&data)
         .map_err(|e| format!("Failed to decode base64: {}", e))?;
-    let file_path = PathBuf::from(&path);
-    if let Some(parent) = file_path.parent() {
+    write_file(PathBuf::from(&path), &bytes).await
+}
+
+/// Saves the raw request body to the file named by the `path` header, given as base64 of its UTF-8
+/// bytes. Large files such as recordings skip the base64 round trip through JSON this way.
+#[tauri::command]
+pub async fn save_bytes(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected the file contents as bytes".to_string());
+    };
+    let path = request
+        .headers()
+        .get("path")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
+        .and_then(|value| String::from_utf8(value).ok())
+        .ok_or("Expected a path to save to")?;
+    write_file(PathBuf::from(path), bytes).await
+}
+
+async fn write_file(path: PathBuf, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| e.to_string())?;
     }
-    tokio::fs::write(&file_path, bytes)
+    tokio::fs::write(&path, bytes)
         .await
         .map_err(|e| format!("Failed to write file: {}", e))
 }
@@ -623,7 +679,7 @@ pub async fn wifi_enable(serial: String, port: Option<u16>) -> Result<String, St
     }
 
     if !connected {
-        return Err(format!("Could not connect to {} -- make sure both devices are on the same WiFi network", addr));
+        return Err(format!("Could not connect to {}. Make sure the phone and this computer are on the same Wi-Fi", addr));
     }
 
     Ok(addr)
@@ -677,9 +733,9 @@ pub async fn stop_mcp_server(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-async fn live_control_socket(state: &State<'_, AppState>) -> Result<Arc<Mutex<another_core::transport::DeviceStream>>, String> {
-    let session = state.session.lock().await;
-    let session = session.as_ref().ok_or("Not connected")?;
+async fn live_control_socket(window: &WebviewWindow, state: &State<'_, AppState>) -> Result<Arc<Mutex<another_core::transport::DeviceStream>>, String> {
+    let sessions = state.sessions.lock().await;
+    let session = sessions.get(window.label()).ok_or("Not connected")?;
     if !session.live_video_control {
         return Err("Live video control needs the Another server".into());
     }
@@ -687,23 +743,23 @@ async fn live_control_socket(state: &State<'_, AppState>) -> Result<Arc<Mutex<an
 }
 
 #[tauri::command]
-pub async fn set_video_bit_rate(bit_rate: u32, state: State<'_, AppState>) -> Result<(), String> {
-    let socket = live_control_socket(&state).await?;
+pub async fn set_video_bit_rate(window: WebviewWindow, bit_rate: u32, state: State<'_, AppState>) -> Result<(), String> {
+    let socket = live_control_socket(&window, &state).await?;
     control::set_video_bit_rate(&socket, bit_rate)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn set_video_size(max_size: u32, max_fps: u32, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn set_video_size(window: WebviewWindow, max_size: u32, max_fps: u32, state: State<'_, AppState>) -> Result<(), String> {
     let serial = state
-        .session
+        .sessions
         .lock()
         .await
-        .as_ref()
+        .get(window.label())
         .map(|session| session.device_serial.clone())
         .ok_or("Not connected")?;
-    let socket = live_control_socket(&state).await?;
+    let socket = live_control_socket(&window, &state).await?;
     let peak = adb::peak_refresh_rate(&serial).await.map_or(u32::MAX, |rate| rate.round() as u32);
     let max_size = max_size.min(u32::from(u16::MAX)) as u16;
     let max_fps = max_fps.min(peak).min(u32::from(u16::MAX)) as u16;
@@ -713,16 +769,16 @@ pub async fn set_video_size(max_size: u32, max_fps: u32, state: State<'_, AppSta
 }
 
 #[tauri::command]
-pub async fn request_key_frame(state: State<'_, AppState>) -> Result<(), String> {
-    let socket = live_control_socket(&state).await?;
+pub async fn request_key_frame(window: WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    let socket = live_control_socket(&window, &state).await?;
     control::request_key_frame(&socket).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn set_show_touches(enabled: bool, state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn set_show_touches(window: WebviewWindow, enabled: bool, state: State<'_, AppState>) -> Result<bool, String> {
     let serial = {
-        let session = state.session.lock().await;
-        session.as_ref().ok_or("Not connected")?.device_serial.clone()
+        let sessions = state.sessions.lock().await;
+        sessions.get(window.label()).ok_or("Not connected")?.device_serial.clone()
     };
     let previous = adb::shell_text(&serial, "settings get system show_touches")
         .await
@@ -778,6 +834,185 @@ pub async fn adb_pair(address: String, code: String) -> Result<(), String> {
     adb::pair(&address, &code).await.map_err(|e| e.to_string())
 }
 
+const QR_NAME_PREFIX: &str = "another-";
+const QR_NAME_LEN: usize = 8;
+const QR_PASSWORD_LEN: usize = 12;
+/// No 0/O or 1/l/I, so the values stay readable in logs.
+const QR_ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const QR_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const QR_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const QR_POLL: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// The pairing name of the QR code on screen. Cleared when the dialog closes, which stops the wait.
+static QR_SESSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[derive(Serialize)]
+pub struct QrPairing {
+    name: String,
+    password: String,
+    size: usize,
+    modules: Vec<bool>,
+}
+
+fn random_text(len: usize) -> Result<String, String> {
+    let mut bytes = vec![0u8; len];
+    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes
+        .iter()
+        .map(|b| QR_ALPHABET[*b as usize % QR_ALPHABET.len()] as char)
+        .collect())
+}
+
+fn qr_session_is(name: &str) -> bool {
+    QR_SESSION
+        .lock()
+        .map(|session| session.as_deref() == Some(name))
+        .unwrap_or(false)
+}
+
+/// Makes a new pairing code for Wireless debugging, Pair device with QR code.
+#[tauri::command]
+pub fn qr_pair_start() -> Result<QrPairing, String> {
+    let name = format!("{}{}", QR_NAME_PREFIX, random_text(QR_NAME_LEN)?);
+    let password = random_text(QR_PASSWORD_LEN)?;
+    let code = qrcode::QrCode::new(adb::pairing_qr_payload(&name, &password)).map_err(|e| e.to_string())?;
+    let modules = code
+        .to_colors()
+        .into_iter()
+        .map(|color| color == qrcode::Color::Dark)
+        .collect();
+    if let Ok(mut session) = QR_SESSION.lock() {
+        *session = Some(name.clone());
+    }
+    Ok(QrPairing {
+        name,
+        password,
+        size: code.width(),
+        modules,
+    })
+}
+
+#[tauri::command]
+pub fn qr_pair_cancel() {
+    if let Ok(mut session) = QR_SESSION.lock() {
+        *session = None;
+    }
+}
+
+#[derive(Serialize)]
+pub struct QrPaired {
+    serial: String,
+    host: String,
+}
+
+/// Clears the pairing session only if it is still `name`, in one step, so a wait that finishes
+/// cannot clear a newer code the user just made.
+fn qr_pair_cancel_if(name: &str) {
+    if let Ok(mut session) = QR_SESSION.lock() {
+        if session.as_deref() == Some(name) {
+            *session = None;
+        }
+    }
+}
+
+/// Waits for the phone that scanned the code, pairs with it and connects.
+#[tauri::command]
+pub async fn qr_pair_wait(name: String, password: String) -> Result<QrPaired, String> {
+    let result = qr_pair(&name, &password).await;
+    qr_pair_cancel_if(&name);
+    result
+}
+
+async fn qr_pair(name: &str, password: &str) -> Result<QrPaired, String> {
+    if !adb::mdns_available().await {
+        return Err("This computer cannot find phones on Wi-Fi. Restart Another, or use a pairing code".to_string());
+    }
+    let deadline = std::time::Instant::now() + QR_SCAN_TIMEOUT;
+    let pairing = loop {
+        if !qr_session_is(name) {
+            return Err("Cancelled".to_string());
+        }
+        let services = adb::mdns_services().await.map_err(|e| {
+            eprintln!("[qr-pair] mdns services failed: {}", e);
+            "This computer cannot find phones on Wi-Fi. Use a pairing code instead".to_string()
+        })?;
+        if let Some(service) = services
+            .into_iter()
+            .find(|s| s.kind == adb::PAIRING_SERVICE && s.name == name)
+        {
+            break service;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("The code expired. Make a new one and scan it again".to_string());
+        }
+        tokio::time::sleep(QR_POLL).await;
+    };
+
+    let known: std::collections::HashSet<String> = adb::list_devices()
+        .await
+        .map(|devices| devices.into_iter().map(|d| d.serial).collect())
+        .unwrap_or_default();
+    adb::pair(&pairing.address, password).await.map_err(|e| {
+        eprintln!("[qr-pair] pairing failed: {}", e);
+        "Pairing did not finish. Make a new code and scan it again".to_string()
+    })?;
+    connect_after_pair(pairing.host(), Some(&known), || qr_session_is(name)).await
+}
+
+fn serial_host(serial: &str) -> Option<&str> {
+    serial.rsplit_once(':').map(|(host, _)| host)
+}
+
+/// Waits for a phone just paired at `host` to connect, connecting to its Wireless debugging port
+/// when adb does not do it by itself. Only that phone counts: a serial at exactly `host`, or one
+/// named after the connect service the phone advertises. With `known`, phones listed before
+/// pairing are skipped.
+async fn connect_after_pair(
+    host: &str,
+    known: Option<&std::collections::HashSet<String>>,
+    wanted: impl Fn() -> bool,
+) -> Result<QrPaired, String> {
+    let deadline = std::time::Instant::now() + QR_CONNECT_TIMEOUT;
+    loop {
+        if !wanted() {
+            return Err("Cancelled".to_string());
+        }
+        let services: Vec<adb::MdnsService> = adb::mdns_services()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.kind == adb::CONNECT_SERVICE && s.host() == host)
+            .collect();
+        if let Ok(devices) = adb::list_devices().await {
+            let joined = devices.into_iter().find(|d| {
+                d.state == "device"
+                    && known.is_none_or(|known| !known.contains(&d.serial))
+                    && (serial_host(&d.serial) == Some(host)
+                        || services.iter().any(|s| d.serial.starts_with(&format!("{}.", s.name))))
+            });
+            if let Some(device) = joined {
+                return Ok(QrPaired { serial: device.serial, host: host.to_string() });
+            }
+        }
+        for service in &services {
+            if adb::connect_device(&service.address).await.is_ok() {
+                return Ok(QrPaired { serial: service.address.clone(), host: host.to_string() });
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("Paired, but the phone did not connect. Turn Wireless debugging off and on, then try again".to_string());
+        }
+        tokio::time::sleep(QR_POLL).await;
+    }
+}
+
+/// Connects to a phone just paired with a pairing code. Wireless debugging listens on a random
+/// port, which the phone advertises over mDNS; it is not the pairing port.
+#[tauri::command]
+pub async fn connect_paired(host: String) -> Result<QrPaired, String> {
+    connect_after_pair(&host, None, || true).await
+}
+
 #[tauri::command]
 pub async fn phone_notifications(
     serial: String,
@@ -786,13 +1021,67 @@ pub async fn phone_notifications(
 }
 
 #[tauri::command]
+pub async fn app_icons(serial: String, packages: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
+    adb::app_icons(&serial, &packages).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn notify_phone(
+    app: AppHandle,
+    title: String,
+    subtitle: String,
+    body: String,
+    package: String,
+    icon: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::phone_notify::show(&app, &title, &subtitle, &body, &package, icon.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn open_phone_app(serial: String, package: String) -> Result<(), String> {
     adb::launch_app(&serial, &package).await.map_err(|e| e.to_string())
 }
 
+const STAY_ON_ALL_SOURCES: &str = "7";
+
+/// Puts back the `stay_on_while_plugged_in` value Another replaced on `serial`.
+pub async fn restore_stay_on(stay_on: &Mutex<HashMap<String, String>>, serial: &str) {
+    let previous = stay_on.lock().await.remove(serial);
+    if let Some(previous) = previous {
+        if let Err(e) = adb::set_stay_on(serial, &previous).await {
+            eprintln!("[stay-on] could not restore {} on {}: {}", previous, serial, e);
+        }
+    }
+}
+
+/// Puts back every phone's setting, when the app quits.
+pub async fn restore_all_stay_on(stay_on: &Mutex<HashMap<String, String>>) {
+    let serials: Vec<String> = stay_on.lock().await.keys().cloned().collect();
+    for serial in serials {
+        restore_stay_on(stay_on, &serial).await;
+    }
+}
+
+/// Keeps `serial` awake while plugged in, or puts back the setting it replaced. The setting is also
+/// put back when the phone's last mirror session ends and when the app quits.
 #[tauri::command]
-pub async fn set_stay_on(serial: String, value: String) -> Result<String, String> {
-    adb::set_stay_on(&serial, &value).await.map_err(|e| e.to_string())
+pub async fn set_stay_on(serial: String, on: bool, state: State<'_, AppState>) -> Result<(), String> {
+    if !on {
+        restore_stay_on(&state.stay_on, &serial).await;
+        return Ok(());
+    }
+    let mut stay_on = state.stay_on.lock().await;
+    if stay_on.contains_key(&serial) {
+        return Ok(());
+    }
+    let previous = adb::set_stay_on(&serial, STAY_ON_ALL_SOURCES).await.map_err(|e| e.to_string())?;
+    stay_on.insert(serial, if previous == "null" { "0".to_string() } else { previous });
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -840,12 +1129,83 @@ pub async fn device_info(serial: String) -> Result<adb::DeviceInfo, String> {
     adb::device_info(&serial).await.map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+pub struct FailedFile {
+    pub name: String,
+    pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct SentFiles {
+    pub installed: Vec<String>,
+    pub pushed: Vec<String>,
+    pub failed: Vec<FailedFile>,
+}
+
+fn display_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn send_files(serial: String, paths: Vec<String>) -> Result<SentFiles, String> {
+    let (apks, files): (Vec<String>, Vec<String>) = paths
+        .into_iter()
+        .partition(|p| p.to_ascii_lowercase().ends_with(".apk") && std::path::Path::new(p).is_file());
+
+    let installs = async {
+        let mut installed = Vec::new();
+        let mut failed = Vec::new();
+        for apk in &apks {
+            match adb::install_apk(&serial, apk).await {
+                Ok(()) => installed.push(display_name(apk)),
+                Err(e) => failed.push(FailedFile { name: display_name(apk), error: e.to_string() }),
+            }
+        }
+        (installed, failed)
+    };
+    let push = async {
+        if files.is_empty() {
+            return Ok(());
+        }
+        adb::push_to_downloads(&serial, &files).await
+    };
+    let ((installed, mut failed), pushed) = tokio::join!(installs, push);
+
+    let names: Vec<String> = files.iter().map(|f| display_name(f)).collect();
+    let pushed = match pushed {
+        Ok(()) => names,
+        Err(e) => {
+            let error = e.to_string();
+            failed.extend(names.into_iter().map(|name| FailedFile { name, error: error.clone() }));
+            Vec::new()
+        }
+    };
+    Ok(SentFiles { installed, pushed, failed })
+}
+
+#[tauri::command]
+pub async fn device_facts(serial: String) -> Result<adb::DeviceFacts, String> {
+    adb::device_facts(&serial).await.map_err(|e| e.to_string())
+}
+
 const CLI_NAME: &str = "another-cli";
 const CLI_COMMAND: &str = "another";
-const CLI_INSTALL_DIR: &str = "/usr/local/bin";
 
-fn cli_link() -> PathBuf {
-    PathBuf::from(CLI_INSTALL_DIR).join(CLI_COMMAND)
+/// The folder on the PATH that `another` goes into. Windows has none the app can write to.
+fn cli_install_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        Some(PathBuf::from("/usr/local/bin"))
+    } else if cfg!(unix) {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("bin"))
+    } else {
+        None
+    }
+}
+
+fn cli_link() -> Option<PathBuf> {
+    cli_install_dir().map(|dir| dir.join(CLI_COMMAND))
 }
 
 /// True when the `another` link on the PATH points at a copy of this app's CLI.
@@ -860,7 +1220,7 @@ fn bundled_cli() -> Result<PathBuf, String> {
     let path = exe
         .parent()
         .ok_or("The app has no folder")?
-        .join(CLI_NAME);
+        .join(format!("{}{}", CLI_NAME, std::env::consts::EXE_SUFFIX));
     if path.exists() {
         Ok(path)
     } else {
@@ -871,34 +1231,69 @@ fn bundled_cli() -> Result<PathBuf, String> {
 /// Where the `another` command is installed on the PATH, if this app installed it.
 #[tauri::command]
 pub async fn cli_status() -> Option<String> {
-    let link = cli_link();
+    let link = cli_link()?;
     (link.exists() && link_is_ours(&link)).then(|| link.to_string_lossy().into_owned())
 }
 
-/// Links the bundled CLI into /usr/local/bin as `another`, asking for an administrator password
-/// through macOS only when the folder is not writable.
+/// Where `install_cli` put the `another` command, and whether that folder is on the PATH.
+#[derive(Serialize)]
+pub struct CliInstall {
+    pub path: String,
+    pub dir: String,
+    pub on_path: bool,
+}
+
+#[cfg(unix)]
+fn on_path(dir: &std::path::Path) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|p| p == dir))
+}
+
+/// An AppImage runs from a mount that goes away when the app quits, so its CLI is copied somewhere
+/// stable first. The copy keeps the CLI's name, so `link_is_ours` still recognizes the link.
+#[cfg(unix)]
+fn stable_cli(source: PathBuf) -> Result<PathBuf, String> {
+    if cfg!(target_os = "macos") || std::env::var_os("APPIMAGE").is_none() {
+        return Ok(source);
+    }
+    let home = std::env::var_os("HOME").ok_or("Could not find your home folder")?;
+    let dir = PathBuf::from(home).join(".local").join("share").join("another");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let copy = dir.join(CLI_NAME);
+    std::fs::copy(&source, &copy).map_err(|e| e.to_string())?;
+    Ok(copy)
+}
+
+/// Links the bundled CLI onto the PATH as `another`. On macOS that is /usr/local/bin, asking for
+/// an administrator password only when the folder is not writable. Elsewhere it is ~/.local/bin.
 #[cfg(unix)]
 #[tauri::command]
-pub async fn install_cli() -> Result<String, String> {
-    let source = bundled_cli()?;
-    let link = cli_link();
+pub async fn install_cli() -> Result<CliInstall, String> {
+    let source = stable_cli(bundled_cli()?)?;
+    let dir = cli_install_dir().ok_or("Could not find your home folder")?;
+    let link = dir.join(CLI_COMMAND);
     if link.symlink_metadata().is_ok() && !link_is_ours(&link) {
-        return Err(format!("{} already has a different command named {}", CLI_INSTALL_DIR, CLI_COMMAND));
+        return Err(format!("{} already has a different command named {}", dir.display(), CLI_COMMAND));
     }
     let direct = (|| -> std::io::Result<()> {
-        std::fs::create_dir_all(CLI_INSTALL_DIR)?;
+        std::fs::create_dir_all(&dir)?;
         if link.symlink_metadata().is_ok() {
             std::fs::remove_file(&link)?;
         }
         std::os::unix::fs::symlink(&source, &link)
     })();
+    let installed = CliInstall {
+        path: link.to_string_lossy().into_owned(),
+        dir: dir.to_string_lossy().into_owned(),
+        on_path: cfg!(target_os = "macos") || on_path(&dir),
+    };
     match direct {
-        Ok(()) => Ok(link.to_string_lossy().into_owned()),
+        Ok(()) => Ok(installed),
+        #[cfg(target_os = "macos")]
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             let quote = |p: &std::path::Path| p.to_string_lossy().replace('\'', "'\\''");
             let shell = format!(
                 "mkdir -p '{dir}' && ln -sf '{src}' '{dst}'",
-                dir = CLI_INSTALL_DIR,
+                dir = quote(&dir),
                 src = quote(&source),
                 dst = quote(&link),
             );
@@ -912,7 +1307,7 @@ pub async fn install_cli() -> Result<String, String> {
                 .await
                 .map_err(|e| e.to_string())?;
             if output.status.success() {
-                Ok(link.to_string_lossy().into_owned())
+                Ok(installed)
             } else {
                 let message = String::from_utf8_lossy(&output.stderr);
                 if message.contains("-128") {
@@ -928,11 +1323,99 @@ pub async fn install_cli() -> Result<String, String> {
 
 #[cfg(not(unix))]
 #[tauri::command]
-pub async fn install_cli() -> Result<String, String> {
-    Err(format!("Add the folder that holds {} to your PATH to use it as {}", CLI_NAME, CLI_COMMAND))
+pub async fn install_cli() -> Result<CliInstall, String> {
+    let source = bundled_cli()?;
+    let dir = source.parent().ok_or("The app has no folder")?;
+    Err(format!("Add {} to your PATH to use {}", dir.display(), CLI_NAME))
 }
 
+pub const MIRROR_LABEL_PREFIX: &str = "mirror-";
+const MIRROR_DEFAULT_SIZE: (f64, f64) = (420.0, 860.0);
+/// The phone view's minimum plus the window chrome around it in `MirrorScreen`.
+const MIRROR_MIN_SIZE: (f64, f64) = (336.0, 300.0);
+#[cfg(target_os = "macos")]
+const TRAFFIC_LIGHTS: (f64, f64) = (28.0, 28.0);
+
+/// One window per phone, so the label is derived from the serial.
+pub fn mirror_label(serial: &str) -> String {
+    let safe: String = serial
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    format!("{}{}", MIRROR_LABEL_PREFIX, safe)
+}
+
+#[derive(serde::Deserialize)]
+pub struct WindowBounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// Sends the calling window's stream to its webview while it records native video.
 #[tauri::command]
-pub async fn set_window_blur(window: tauri::WebviewWindow, percent: u32) -> Result<(), String> {
-    crate::window_blur::set_blur(&window, percent).map_err(|e| e.to_string())
+pub fn set_record_feed(window: WebviewWindow, enabled: bool) {
+    video::set_record_feed(window.label(), enabled);
+}
+
+/// Opens the phone's mirror window, or brings it forward when it is already open.
+#[tauri::command]
+pub async fn open_mirror(
+    app: AppHandle,
+    serial: String,
+    title: String,
+    details: serde_json::Map<String, serde_json::Value>,
+    bounds: Option<WindowBounds>,
+) -> Result<(), String> {
+    let label = mirror_label(&serial);
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        return window.set_focus().map_err(|e| e.to_string());
+    }
+    let mut identity = details;
+    identity.insert("serial".into(), serial.clone().into());
+    identity.insert("title".into(), title.clone().into());
+    let identity = serde_json::Value::Object(identity);
+    let mut builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
+        .title(&title)
+        .initialization_script(format!("window.__ANOTHER_MIRROR__ = {};", identity))
+        .min_inner_size(MIRROR_MIN_SIZE.0, MIRROR_MIN_SIZE.1)
+        .resizable(true)
+        .accept_first_mouse(true);
+    builder = match bounds {
+        Some(b) => builder.inner_size(b.width, b.height).position(b.x, b.y),
+        None => builder.inner_size(MIRROR_DEFAULT_SIZE.0, MIRROR_DEFAULT_SIZE.1).center(),
+    };
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .traffic_light_position(tauri::LogicalPosition::new(TRAFFIC_LIGHTS.0, TRAFFIC_LIGHTS.1));
+    }
+    builder.build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Closes a phone's mirror window, which ends its session.
+#[tauri::command]
+pub async fn close_mirror(app: AppHandle, serial: String) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&mirror_label(&serial)) {
+        window.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::mirror_label;
+
+    #[test]
+    fn mirror_labels_only_use_safe_characters() {
+        assert_eq!(mirror_label("192.168.1.24:5555"), "mirror-192_168_1_24_5555");
+        assert_eq!(mirror_label("emulator-5554"), "mirror-emulator-5554");
+        assert_eq!(mirror_label("adb-R58M._adb-tls-connect._tcp"), "mirror-adb-R58M__adb-tls-connect__tcp");
+    }
 }

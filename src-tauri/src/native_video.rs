@@ -24,11 +24,11 @@ use objc2_video_toolbox::{
     kVTDecompressionPropertyKey_RealTime, VTDecodeFrameFlags, VTDecodeInfoFlags,
     VTDecompressionOutputCallbackRecord, VTDecompressionSession, VTSession, VTSessionSetProperty,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::WebviewWindow;
@@ -50,11 +50,15 @@ struct Placement {
     window: WebviewWindow,
 }
 
-static PLACEMENT: Mutex<Option<Placement>> = Mutex::new(None);
 /// Matches the rounded video frame in the mirror window.
 const VIDEO_CORNER_RADIUS: f64 = 12.0;
-static FRAME: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
-static ACTIVE: Mutex<Option<Weak<DecodeContext>>> = Mutex::new(None);
+
+/// Each mirror window has its own layer, frame and decoder, keyed by the window label.
+static PLACEMENTS: LazyLock<Mutex<HashMap<String, Placement>>> = LazyLock::new(Default::default);
+/// x, y, width and height of the video in the window, in points.
+type FrameRect = (f64, f64, f64, f64);
+static FRAMES: LazyLock<Mutex<HashMap<String, FrameRect>>> = LazyLock::new(Default::default);
+static ACTIVE: LazyLock<Mutex<HashMap<String, Weak<DecodeContext>>>> = LazyLock::new(Default::default);
 
 struct Probe {
     x: f64,
@@ -131,14 +135,18 @@ impl NativeVideo {
             .map_err(|_| anyhow!("Timed out attaching the video layer"))?
             .ok_or_else(|| anyhow!("The webview has no layer to attach the video to"))?;
         let layer = Arc::new(layer);
+        let label = window.label().to_string();
 
-        if let Ok(mut placement) = PLACEMENT.lock() {
-            *placement = Some(Placement {
-                layer: layer.clone(),
-                window: window.clone(),
-            });
+        if let Ok(mut placements) = PLACEMENTS.lock() {
+            placements.insert(
+                label.clone(),
+                Placement {
+                    layer: layer.clone(),
+                    window: window.clone(),
+                },
+            );
         }
-        reposition();
+        reposition(&label);
 
         let context = Arc::new(DecodeContext {
             layer,
@@ -149,7 +157,7 @@ impl NativeVideo {
             probe: Mutex::new(None),
         });
         if let Ok(mut active) = ACTIVE.lock() {
-            *active = Some(Arc::downgrade(&context));
+            active.insert(label, Arc::downgrade(&context));
         }
 
         Ok(Self {
@@ -225,12 +233,18 @@ impl NativeVideo {
 impl Drop for NativeVideo {
     fn drop(&mut self) {
         self.invalidate();
-        if let Ok(mut placement) = PLACEMENT.lock() {
-            if placement
-                .as_ref()
+        let label = self.window.label();
+        if let Ok(mut placements) = PLACEMENTS.lock() {
+            if placements
+                .get(label)
                 .is_some_and(|p| Arc::ptr_eq(&p.layer, &self.context.layer))
             {
-                *placement = None;
+                placements.remove(label);
+            }
+        }
+        if let Ok(mut active) = ACTIVE.lock() {
+            if active.get(label).is_some_and(|context| context.upgrade().is_none()) {
+                active.remove(label);
             }
         }
         let layer = self.context.layer.clone();
@@ -242,8 +256,8 @@ impl Drop for NativeVideo {
 
 /// Takes the video layer off the webview right away, so the last frame never lingers behind the
 /// translucent window once mirroring stops. Dropping the decoder later is then a no-op.
-pub fn detach() {
-    let Some(placement) = PLACEMENT.lock().ok().and_then(|mut p| p.take()) else {
+pub fn detach(label: &str) {
+    let Some(placement) = PLACEMENTS.lock().ok().and_then(|mut p| p.remove(label)) else {
         return;
     };
     let layer = placement.layer.clone();
@@ -254,11 +268,8 @@ pub fn detach() {
 
 /// Watches decoded frames for a change around (x, y), given as fractions of the frame size. The
 /// receiver gets the moment the first changed frame was put on the layer.
-pub fn arm_probe(x: f64, y: f64) -> Result<Receiver<Instant>> {
-    let context = ACTIVE
-        .lock()
-        .ok()
-        .and_then(|active| active.as_ref().and_then(Weak::upgrade))
+pub fn arm_probe(label: &str, x: f64, y: f64) -> Result<Receiver<Instant>> {
+    let context = active_context(label)
         .ok_or_else(|| anyhow!("Native video is not running"))?;
     let latest = context
         .shown
@@ -274,9 +285,12 @@ pub fn arm_probe(x: f64, y: f64) -> Result<Receiver<Instant>> {
     Ok(receiver)
 }
 
-pub fn disarm_probe() {
-    let context = ACTIVE.lock().ok().and_then(|active| active.as_ref().and_then(Weak::upgrade));
-    if let Some(context) = context {
+fn active_context(label: &str) -> Option<Arc<DecodeContext>> {
+    ACTIVE.lock().ok().and_then(|active| active.get(label).and_then(Weak::upgrade))
+}
+
+pub fn disarm_probe(label: &str) {
+    if let Some(context) = active_context(label) {
         if let Ok(mut probe) = context.probe.lock() {
             *probe = None;
         }
@@ -316,21 +330,29 @@ fn mean_difference(a: &[u8], b: &[u8]) -> f64 {
     total as f64 / (a.len() / BYTES_PER_PIXEL).max(1) as f64 / 3.0
 }
 
-pub fn set_frame(x: f64, y: f64, width: f64, height: f64) {
-    if let Ok(mut frame) = FRAME.lock() {
-        *frame = Some((x, y, width, height));
+pub fn set_frame(label: &str, x: f64, y: f64, width: f64, height: f64) {
+    if let Ok(mut frames) = FRAMES.lock() {
+        frames.insert(label.to_string(), (x, y, width, height));
     }
-    reposition();
+    reposition(label);
 }
 
-fn reposition() {
-    let Some(frame) = FRAME.lock().ok().and_then(|f| *f) else {
+/// Forgets a closed window's frame so a new window with the same label starts clean.
+pub fn forget(label: &str) {
+    detach(label);
+    if let Ok(mut frames) = FRAMES.lock() {
+        frames.remove(label);
+    }
+}
+
+fn reposition(label: &str) {
+    let Some(frame) = FRAMES.lock().ok().and_then(|f| f.get(label).copied()) else {
         return;
     };
-    let Some((layer, window)) = PLACEMENT
+    let Some((layer, window)) = PLACEMENTS
         .lock()
         .ok()
-        .and_then(|p| p.as_ref().map(|p| (p.layer.clone(), p.window.clone())))
+        .and_then(|p| p.get(label).map(|p| (p.layer.clone(), p.window.clone())))
     else {
         return;
     };

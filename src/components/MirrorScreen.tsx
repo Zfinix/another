@@ -5,6 +5,7 @@ import { Icon } from "@/components/Icon";
 import { Menu, MenuPopup, MenuItem, MenuSeparator, MenuSubmenu } from "@/components/ui/menu";
 import { StartingState, type StartStep } from "@/components/StateViews";
 import type { IconName } from "@/lib/icons";
+import type { FileDropState } from "@/hooks/useFileDrop";
 import type { PerfStats, QuickActionId } from "../types";
 import { QUICK_ACTION_ORDER } from "../types";
 
@@ -37,6 +38,7 @@ interface MirrorScreenProps {
   recording: boolean;
   muted: boolean;
   macroRecording: boolean;
+  fileDrop: FileDropState;
   pins: QuickActionId[];
   onTogglePin: (id: QuickActionId) => void;
   macros: string[];
@@ -250,6 +252,19 @@ export function MirrorScreen(props: MirrorScreenProps) {
                 {props.reconnecting.action && <button type="button" className="button button--secondary" onClick={props.reconnecting.action.run}>{props.reconnecting.action.label}</button>}
               </div>
             </>
+          )}
+
+          {props.fileDrop?.kind === "hover" && (
+            <div className="t-dark absolute pointer-events-none flex items-center justify-center" style={{ inset: 8, borderRadius: 12, border: "2px dashed var(--accent)", background: "rgba(0,0,0,.45)", color: "#fcfcfc" }}>
+              <span className="glass toast"><Icon name="down" />{props.fileDrop.label}</span>
+            </div>
+          )}
+
+          {props.fileDrop?.kind === "busy" && !props.reconnecting && (
+            <div className="glass toast t-dark absolute" style={{ left: 12, right: 12, top: 12, color: "#fcfcfc" }}>
+              <span className="spinner" />
+              <span className="flex-1 min-w-0 truncate">{props.fileDrop.label}</span>
+            </div>
           )}
 
           {macroRecording && !props.reconnecting && (

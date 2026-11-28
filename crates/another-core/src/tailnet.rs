@@ -4,6 +4,11 @@ use serde_json::Value;
 use std::path::PathBuf;
 use tokio::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 const ADB_PORT: u16 = 5555;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -24,15 +29,21 @@ pub struct TailnetStatus {
     pub peers: Vec<TailnetPeer>,
 }
 
-/// Apps started from Finder get a minimal PATH, so the usual install locations are tried first.
+#[cfg(target_os = "macos")]
+const TAILSCALE_PATHS: &[&str] = &[
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+];
+#[cfg(windows)]
+const TAILSCALE_PATHS: &[&str] = &[r"C:\Program Files\Tailscale\tailscale.exe"];
+#[cfg(not(any(target_os = "macos", windows)))]
+const TAILSCALE_PATHS: &[&str] = &["/usr/bin/tailscale", "/usr/local/bin/tailscale"];
+
+/// Apps started from Finder or the Start menu get a minimal PATH, so the usual install locations
+/// are tried first.
 fn tailscale_path() -> PathBuf {
-    let candidates = [
-        "/usr/local/bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-        "/usr/bin/tailscale",
-    ];
-    candidates
+    TAILSCALE_PATHS
         .iter()
         .map(PathBuf::from)
         .find(|path| path.exists())
@@ -41,8 +52,11 @@ fn tailscale_path() -> PathBuf {
 
 /// The Android devices on this computer's tailnet.
 pub async fn status() -> Result<TailnetStatus> {
-    let output = Command::new(tailscale_path())
-        .args(["status", "--json"])
+    let mut cmd = Command::new(tailscale_path());
+    cmd.args(["status", "--json"]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
         .output()
         .await
         .map_err(|e| anyhow!("Tailscale is not installed: {}", e))?;

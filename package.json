@@ -24,6 +24,7 @@
     "@tauri-apps/plugin-updater": "^2.10.0",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
+    "input-otp": "^1.5.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwind-merge": "^3.5.0",
